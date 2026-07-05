@@ -1,0 +1,67 @@
+{
+  "_note": "Representative Anthropic Messages API content-block shapes (anonymized). These are the per-request 'last appended message' plus assistant responses that the proxy adapter will emit. MUST be replaced/validated with real anonymized Claude Code traffic in Phase 3 before the parser is trusted.",
+  "events": [
+    {
+      "role": "user",
+      "content_blocks": [{"type": "text", "text": "<redacted prompt 1>"}],
+      "model": "claude-sonnet-4",
+      "temperature": 1.0,
+      "timestamp": "2026-06-20T00:00:00+00:00"
+    },
+    {
+      "role": "assistant",
+      "content_blocks": [
+        {"type": "text", "text": "<redacted>"},
+        {"type": "tool_use", "id": "toolu_1", "name": "read_file", "input": {}}
+      ],
+      "model": "claude-sonnet-4",
+      "temperature": null,
+      "timestamp": "2026-06-20T00:00:02+00:00"
+    },
+    {
+      "role": "user",
+      "content_blocks": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "<redacted>"}],
+      "model": "claude-sonnet-4",
+      "temperature": 1.0,
+      "timestamp": "2026-06-20T00:00:03+00:00"
+    },
+    {
+      "role": "assistant",
+      "content_blocks": [
+        {"type": "text", "text": "<redacted>"},
+        {"type": "tool_use", "id": "toolu_2", "name": "edit_file", "input": {}}
+      ],
+      "model": "claude-sonnet-4",
+      "temperature": null,
+      "timestamp": "2026-06-20T00:00:05+00:00"
+    },
+    {
+      "role": "user",
+      "content_blocks": [{"type": "tool_result", "tool_use_id": "toolu_2", "content": "<redacted>"}],
+      "model": "claude-sonnet-4",
+      "temperature": 1.0,
+      "timestamp": "2026-06-20T00:00:06+00:00"
+    },
+    {
+      "role": "assistant",
+      "content_blocks": [{"type": "text", "text": "<redacted>"}],
+      "model": "claude-sonnet-4",
+      "temperature": null,
+      "timestamp": "2026-06-20T00:00:08+00:00"
+    },
+    {
+      "role": "user",
+      "content_blocks": [{"type": "text", "text": "<redacted prompt 2>"}],
+      "model": "claude-sonnet-4",
+      "temperature": 1.0,
+      "timestamp": "2026-06-20T00:00:30+00:00"
+    },
+    {
+      "role": "assistant",
+      "content_blocks": [{"type": "text", "text": "<redacted>"}],
+      "model": "claude-sonnet-4",
+      "temperature": null,
+      "timestamp": "2026-06-20T00:00:32+00:00"
+    }
+  ]
+}

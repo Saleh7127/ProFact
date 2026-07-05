@@ -1,0 +1,10 @@
+old-specs/
+
+# Python
+.venv/
+__pycache__/
+*.egg-info/
+.DS_Store
+
+.profact/
+.pytest_cache/
