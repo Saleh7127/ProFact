@@ -1,2 +1,2 @@
-# V2C2
-Only Vibe
+# ProFact - Prompt + Artifact
+Version Control for Vibe Coding
