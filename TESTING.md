@@ -30,7 +30,7 @@ and installs the dev dependency (`pytest`).
 pytest -q
 ```
 
-Expected: **29 passed**. Coverage by area:
+Expected: **42 passed**. Coverage by area:
 
 | File | What it proves |
 |------|----------------|
@@ -40,6 +40,7 @@ Expected: **29 passed**. Coverage by area:
 | `test_cli.py` | `log`/`show`/`status`/`checkout`, full branching DoD |
 | `test_cursor_hooks.py` | Cursor hook events → versions; `start` installs hooks |
 | `test_phase7.py` | `note` (Git Notes) and `start --claude` wiring |
+| `test_branch_heads.py` | per-branch HEADs, carry-over, cross-branch checkout prompt, `doctor` |
 
 ---
 
@@ -88,7 +89,89 @@ profact checkout v2         # button.py is blue again; v3 still exists in log
 
 ---
 
-## 4. Real capture path A — Cursor (primary)
+## 4. Git branches — per-branch HEADs with carry-over
+
+profact history is **branch-local**: each Git branch has its own HEAD, and a new
+Git branch **carries over** the history up to the point you branched off (like
+Git itself), then diverges into a fork.
+
+Continuing in the `/tmp/pf-demo` repo from section 3 (assume `main` has
+`v1(anchor) → v2`), create a Git branch and add a version on it:
+
+```bash
+git checkout -b experiment
+python - <<'PY'
+from pathlib import Path
+from profact.adapters import cursor_hooks
+repo = Path("/tmp/pf-demo")
+def ev(name, **k): return {"hook_event_name": name, "generation_id": "g1", **k}
+cursor_hooks.handle(repo, ev("beforeSubmitPrompt", prompt="experiment work"))
+(repo/"exp.py").write_text("x = 1\n")
+cursor_hooks.handle(repo, ev("afterAgentResponse", text="Done."))
+cursor_hooks.handle(repo, ev("stop"))
+PY
+
+profact log     # shows v1, v2 (carried over, labeled (main)) + v3 (experiment)
+```
+
+The `(branch)` column shows where each version was created — the shared trunk
+stays `(main)` while your new work is `(experiment)`:
+
+```
+v3    HEAD [prompt    ] (experiment)   experiment work
+v2         [prompt    ] (main)         make the button blue
+v1         [anchor    ] (main)         start of history @ ...
+```
+
+`profact log` is a terse flat list. `profact log --graph` draws the actual DAG
+with ASCII lanes (`*` = a version, `|` = a lane, `/` = lanes converging on a
+shared parent), plus a `tips:` / `branch points:` footer — most useful once
+history forks:
+
+```
+* v5    HEAD [prompt    ] (experiment)   ...
+|* v4        [prompt    ] (main)         ...
+*| v3        [prompt    ] (main)         ...
+|/
+* v2         [prompt    ] (main)         ...
+* v1         [anchor    ] (main)         ...
+```
+
+Now go back to `main` and confirm the branches stay independent:
+
+```bash
+git checkout main
+profact log     # shows only v1, v2 — experiment's v3 is NOT here
+profact status  # HEAD is back at main's own tip (v2), not v3
+```
+
+Prompt again on `main` and it forks off the shared branch point (v2), not off
+experiment — `v1 → v2 → v4` on main, `v1 → v2 → v3` on experiment.
+
+**Cross-branch checkout asks first.** A version is "part of this branch" if it
+was created here or is a carried-over ancestor. Restoring a version that lives
+only on another branch would make your Git branch and files disagree, so profact
+prompts before doing it instead of silently proceeding:
+
+```bash
+profact checkout v3
+# note: 'v3' is not part of branch 'main' history (it was created on
+# 'experiment' and isn't an ancestor of this branch).
+# Check it out into 'main' anyway? [y/N]:
+```
+
+- Answer **n** (default) → aborts, nothing changes.
+- Answer **y** → brings the version into the current branch (auto-checkpoints
+  first, restores the tree, moves this branch's HEAD to it). It then appears in
+  `profact log` for this branch so HEAD is never a dangling reference.
+- Use `profact checkout <id> --force` (or `-f`) to skip the prompt in scripts.
+
+Shared-trunk versions (e.g. `v1`, `v2`) are part of the branch, so they check out
+directly with no prompt.
+
+---
+
+## 5. Real capture path A — Cursor (primary)
 
 This is the intended day-to-day mode.
 
@@ -119,7 +202,7 @@ profact log                               # a new prompt version appears
 
 ---
 
-## 5. Real capture path B — Claude Code (secondary)
+## 6. Real capture path B — Claude Code (secondary)
 
 Requires the `claude` CLI installed and on PATH.
 
@@ -135,13 +218,40 @@ tears the proxy/watcher down when `claude` exits. Inspect with `profact log` /
 
 ---
 
-## 6. Optional — link a version to a Git commit
+## 7. Optional — link a version to a Git commit
 
 ```bash
 git commit -m "ship login"
 profact note HEAD          # writes git notes --ref=profact mapping the commit -> HEAD version
 git notes --ref=profact show HEAD
 ```
+
+---
+
+## 8. Maintenance — `profact doctor`
+
+`doctor` scans `.profact/history.db` for safe-to-remove artifacts and reports
+them. It changes nothing unless you pass `--fix`.
+
+```bash
+profact doctor            # report only
+profact doctor --fix      # prune the safe items it found
+```
+
+It looks for:
+
+- **Phantom checkpoints** — `checkpoint` versions whose diff is empty or touches
+  only profact's own infrastructure (`.profact/`, `.cursor/hooks*`). These are
+  artifacts of an older snapshot bug; `--fix` rewires any children onto the
+  checkpoint's parent, moves any HEAD off it, and deletes it.
+- **Orphaned objects** — blobs under `.profact/objects/` no longer referenced by
+  any version; `--fix` deletes them to reclaim space.
+- **Dangling open turns** — `prompt` versions never finalized (`tree_after`
+  NULL), e.g. a session that crashed before `stop`. These are **reported only**
+  and never deleted (they hold real work and finalize on the next prompt).
+
+`doctor` never touches `prompt`/`anchor`/`human` versions or any checkpoint that
+recorded real source changes.
 
 ---
 
@@ -168,9 +278,20 @@ git notes --ref=profact show HEAD
   on startup yet.
 
 ### Design decisions that are limitations by choice
-- **Branch-scoped history.** `profact log` shows only the current Git branch's
-  versions. Switching Git branches shows a different (fresh) history; there is
-  no cross-branch merge of profact history.
+- **Branch-scoped history with carry-over.** Each Git branch has its own HEAD.
+  `profact log` shows the current branch's own versions **plus the carried-over
+  trunk** it branched from (the `(branch)` column shows each version's origin). A
+  new Git branch inherits history up to its branch point and diverges from there.
+  Checking out a version that lives only on another branch **prompts for
+  confirmation** (or `--force`) rather than proceeding silently. There is still no
+  *merge* of divergent profact history across branches.
+- **Carry-over seed can be imprecise without profact activity.** A new branch's
+  starting point is seeded from the repo-wide "last active" version. In the normal
+  flow (work on a branch, then `git checkout -b new`, then prompt) this is exactly
+  the branch tip. But if you `git checkout` to a *stale* branch and immediately
+  branch off it **without** any profact-visible work in between, the seed may be
+  the last globally-active version instead of that branch's tip — profact has no
+  Git post-checkout hook to observe raw branch switches.
 - **`.profact/` is gitignored, not shared.** History is local and single-user.
   Prompts/responses may contain secrets, so nothing is committed. No team
   sync/merge.
@@ -188,12 +309,14 @@ git notes --ref=profact show HEAD
   envs, re-run `profact start`. The generated `.cursor/` hook files are
   machine-specific and not meant to be committed for others — `start` adds
   `.cursor/hooks.json` and `.cursor/hooks/` to `.gitignore` automatically.
-- **Checkout never deletes the hooks.** Because `.gitignore` is itself versioned,
-  checking out a version created *before* `profact start` would otherwise restore
-  an old `.gitignore` and let a later checkout delete the hook files (silently
-  disabling capture). profact hard-protects its own infrastructure
-  (`.profact/`, `.cursor/hooks.json`, `.cursor/hooks/`) so checkout can never
-  remove it, regardless of gitignore state.
+- **Checkout never deletes the hooks, and snapshots never capture them.** Because
+  `.gitignore` is itself versioned, checking out a version created *before*
+  `profact start` restores an old `.gitignore` without the `.cursor` entries.
+  profact hard-protects its own infrastructure (`.profact/`, `.cursor/hooks.json`,
+  `.cursor/hooks/`) on two fronts, regardless of gitignore state: (1) `checkout`
+  never deletes it, and (2) `write_tree` removes it from every snapshot. Without
+  (2), a checkout would re-capture the (undeletable) hook files, drift the tree,
+  and invent phantom `checkpoint` versions from work you never did.
 - **Requires a Git repo.** Every command resolves the repo via `git`; running
   outside a repository errors out. Snapshots use a shadow index
   (`GIT_INDEX_FILE`), so your real staging area is never touched.

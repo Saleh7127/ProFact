@@ -57,7 +57,7 @@ def _on_prompt(repo_root: Path, event: dict) -> None:
         # A new user message closes any turn left open (e.g. `stop` never fired).
         _finalize_open(repo_root, conn)
         tree_before = git_ops.write_tree(repo_root)
-        parent_id = store.read_head(repo_root) or None
+        parent_id = store.read_head(repo_root, branch)
         version = store.create_version(
             conn,
             type="prompt",
@@ -69,7 +69,7 @@ def _on_prompt(repo_root: Path, event: dict) -> None:
             generation_id=event.get("generation_id"),
             conversation_id=event.get("conversation_id"),
         )
-    store.write_head(repo_root, version.id)
+    store.write_head(repo_root, branch, version.id)
 
 
 def _on_response(repo_root: Path, event: dict) -> None:
@@ -111,7 +111,8 @@ def _finalize_open(repo_root: Path, conn: sqlite3.Connection) -> None:
 
 def _open_prompt(repo_root: Path, conn: sqlite3.Connection) -> store.Version | None:
     """The open turn = the HEAD `prompt` version not yet finalized (tree_after NULL)."""
-    head = store.read_head(repo_root)
+    branch = git_ops.current_branch(repo_root)
+    head = store.read_head(repo_root, branch, seed=False)
     if not head:
         return None
     version = store.get_version(conn, head)

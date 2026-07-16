@@ -29,7 +29,7 @@ These were debated and are now final for the MVP. Do not re-litigate; implement 
 | # | Question | Decision |
 |---|----------|----------|
 | A | Backward navigation + new changes | New version, `parent_id` points to the version it branched from (DAG, never overwrite) |
-| B | Versioning scope: per Git branch or global | **Branch-scoped.** Each version records its `git_branch`; `profact log` shows only the current branch's versions. A new Git branch starts fresh |
+| B | Versioning scope: per Git branch or global | **Branch-scoped with carry-over.** Each version records its `git_branch`; each Git branch has its own profact HEAD. A new Git branch **inherits** the history up to the point it branched off (like Git itself) and diverges from there; `profact log` shows the current branch's versions plus their carried-over ancestors |
 | C | Storage committed or gitignored | **Gitignored.** `.profact/` is added to `.gitignore` on `init`. Sharing/committing history is future work |
 | D | Init on existing project | Start at init point: insert one `anchor` version at the current commit; do not fabricate past prompts |
 | E | Multiple API calls per user prompt | One user-typed message = one version (turn-boundary rule). Tool-loop API calls are absorbed; the final artifact is the version |
@@ -54,20 +54,22 @@ Every version has a `parent_id`, forming a DAG — never a flat list, never over
 - Going back to an earlier version and making new changes always creates a **new** version whose `parent_id` is the version it branched from — the old line is never overwritten.
 
 ### 2. HEAD — current position
-`.profact/HEAD` is a plain text file containing the current version's id, like Git's HEAD.
-- Every new version's `parent_id` is read from HEAD, not from "whatever was created most recently."
-- `checkout <id>` is the only command that moves HEAD manually.
-- After a new version (prompt or human) is finalized, HEAD advances to it automatically.
+`profact` maintains a current version id like Git's HEAD, but the value is **branch-local**:
+- Each Git branch has its own profact HEAD, stored in SQLite (a `heads` table keyed by `git_branch`). There must not be one global HEAD shared by all Git branches.
+- Every new version's `parent_id` is read from the current Git branch's profact HEAD, not from "whatever was created most recently" and not from another Git branch's HEAD.
+- **Carry-over seeding:** when a Git branch has no HEAD of its own yet (freshly created), its HEAD is seeded from the repo-wide "last active" pointer (the legacy `.profact/HEAD` file, kept in sync on every HEAD move). This makes the new branch inherit the version you branched off from, so its first new version chains onto that lineage — mirroring how a Git branch shares its parent's commit history.
+- `checkout <id>` is the only command that moves the current Git branch's profact HEAD manually.
+- After a new version (prompt or human) is finalized, the current Git branch's profact HEAD advances to it automatically.
 
 This is what makes "go back to v2, prompt again, get a new branch, old branch still there" actually work.
 
-### 3. Branch-scoped history (Decision B)
+### 3. Branch-scoped history with carry-over (Decision B)
 - Each version stores its `git_branch` (captured at creation time).
-- `profact log` shows **only versions whose `git_branch` matches the current Git branch**.
-- On `profact init` / `profact start`, if the current Git branch has **no** profact versions yet:
-  - If the branch has prior Git commits → insert one `anchor` version at the current commit and point HEAD to it.
-  - Then versioning continues forward from there.
-- Switching Git branches switches which versions are visible; a new branch starts its own fresh line.
+- `profact log` shows the versions **created on the current Git branch plus their ancestors** (the ancestors may carry a different `git_branch` because they were inherited from the branch you forked off). Concretely: take all rows with `git_branch = current`, then walk `parent_id` upward to reattach the shared trunk. A plain `git_branch =` filter is **not** sufficient — it would drop the carried-over history.
+- On `profact init`, if the current Git branch has prior Git commits → insert one `anchor` version at the current commit/current working tree and point this Git branch's profact HEAD to it.
+- **New Git branch (carry-over):** when you `git checkout -b X` and then produce your first version on `X`, profact does **not** start a blank line. `X`'s HEAD is seeded from the branch point (see §2 carry-over seeding), so the new version's `parent_id` is the tip you branched off. `X` and the original branch then share the common trunk and diverge — a fork in the DAG, exactly like Git commits.
+- Switching Git branches switches both the visible versions and the active profact HEAD; each branch's HEAD moves independently.
+- Cross-branch checkout is guarded in the MVP: if `target.git_branch` does not match the current Git branch, `profact checkout <id>` must refuse by default and tell the user to `git switch <target.git_branch>` first. Applying one Git branch's profact snapshot onto another Git branch is future work and must require an explicit command/flag.
 
 ### 4. One user prompt = one version (turn-boundary rule, Decision E)
 Claude Code makes multiple API round trips per user-visible prompt (read file → edit file → run tests). The proxy must **group these into a single version**:
@@ -102,14 +104,16 @@ The goal: never silently lose a change and never attribute human work to the AI.
 ```
 checkout(target_id):
     1. Snapshot current working directory via shadow index → current_tree
-    2. If current_tree != tree_after(HEAD):
-           create a `checkpoint` version: parent=HEAD, tree_after=current_tree
+    2. Load HEAD for the current Git branch.
+    3. Refuse if target_id belongs to a different Git branch.
+    4. If current_tree != tree_after(HEAD):
+           create a `checkpoint` version: parent=HEAD, git_branch=current Git branch, tree_after=current_tree
            (preserves whatever the user had, untracked/uncommitted, before moving)
-    3. Restore target_id's tree_after into the working directory:
+    5. Restore target_id's tree_after into the working directory:
            - git read-tree <target_tree> (into shadow index)
            - git checkout-index -a -f (write files into working dir)
            - delete files present now but absent in target_tree
-    4. Write target_id into .profact/HEAD
+    6. Write target_id into the current Git branch's profact HEAD
 ```
 - **Deletion rule:** only reconcile files that are part of the shadow-index snapshot domain. Files ignored by `.gitignore` are not in these trees and must be **left alone** (e.g. `.env`, build caches, editor files, dependency dirs). A `--clean-ignored` flag may be added later, but MVP checkout preserves ignored local files.
 - **Infrastructure protection:** profact's own capture machinery (`.profact/`, `.cursor/hooks.json`, `.cursor/hooks/`) is hard-protected from deletion during checkout. `.gitignore` is itself versioned, so checking out a version created before `profact start` would otherwise revert the ignore rules and let a subsequent checkout delete the hook files — silently disabling capture. These paths are skipped unconditionally, independent of gitignore state. `profact start` also adds the `.cursor/hooks*` entries to `.gitignore` (they are machine-specific).
@@ -187,8 +191,9 @@ These read from `store` + `git_ops` and work for **any** adapter, so they are bu
 profact init                    # Phase 1
 profact log [--graph] [--path]  # versions on the CURRENT git branch; --graph shows the DAG + HEAD; --path = HEAD ancestry only
 profact show <id>               # full prompt, response, diff, confidence (warns on 'uncertain')
-profact checkout <id>           # §8 — auto-checkpoint, restore tree, move HEAD; preserves ignored files
+profact checkout <id> [-f]      # §8 — auto-checkpoint, restore tree, move HEAD; preserves ignored files; prompts before a cross-branch target (--force skips)
 profact status                  # current HEAD id, branch, dirty-vs-HEAD, any open/in-progress version
+profact doctor [--fix]          # report/prune history artifacts: phantom checkpoints, orphaned objects (dangling turns report-only)
 ```
 
 ### Phase 6 — Cursor Hooks adapter (primary capture) + `start`
@@ -240,7 +245,8 @@ If asked to build any of these mid-phase, redirect back to the current phase.
 ## DEFINITION OF DONE
 
 The Phase 5 test sequence runs end to end: branching backward from v1 after v2 exists produces a new, separate line of history (v3) without deleting or overwriting v2, and `checkout` between them never loses work in either direction. Additionally:
-- `profact log` is correctly scoped to the current Git branch; a new branch starts fresh.
+- `profact log` and profact HEAD are branch-local; a new Git branch carries over the history up to its branch point and diverges from there (shared trunk, forked tips).
+- `profact checkout <id>` prompts for confirmation before restoring a version that is not part of the current branch's history (created on another branch and not a carried-over ancestor); `--force` skips the prompt. Confirming brings the version into the current branch (auto-checkpoint, restore tree, move HEAD) and it becomes visible in `profact log`.
 - A manual edit made with no active prompt is preserved as a `human` version (nothing in the middle is lost).
 - `profact log --graph` shows branches and HEAD; `anchor` / `checkpoint` / `human` versions are discoverable.
 - `checkout` preserves ignored local files such as `.env`.

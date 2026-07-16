@@ -59,7 +59,7 @@ class CaptureSession:
     def _on_open(self, turn: Turn) -> None:
         branch = git_ops.current_branch(self.repo_root)
         tree_before = git_ops.write_tree(self.repo_root)
-        parent_id = store.read_head(self.repo_root) or None
+        parent_id = store.read_head(self.repo_root, branch)
         prompt_ref = store.write_object(self.repo_root, turn.prompt_text)
         with store.connect(self.repo_root) as conn:
             version = store.create_version(
@@ -76,7 +76,7 @@ class CaptureSession:
         self._open_version_id = version.id
         self._last_ai_version = version.id
         self._turn_open = True
-        store.write_head(self.repo_root, version.id)
+        store.write_head(self.repo_root, branch, version.id)
 
     def _on_close(self, turn: Turn) -> None:
         version_id = self._version_by_turn.pop(turn.index, None)
@@ -125,7 +125,7 @@ class CaptureSession:
 
     def _create_human_version(self) -> None:
         branch = git_ops.current_branch(self.repo_root)
-        head_id = store.read_head(self.repo_root) or None
+        head_id = store.read_head(self.repo_root, branch)
         tree_after = git_ops.write_tree(self.repo_root)
         tree_before = tree_after
         if head_id is not None:
@@ -147,7 +147,7 @@ class CaptureSession:
                 tree_after=tree_after,
                 diff_ref=diff_ref,
             )
-        store.write_head(self.repo_root, version.id)
+        store.write_head(self.repo_root, branch, version.id)
 
     def _within_window(self) -> bool:
         if self._last_close_monotonic is None:

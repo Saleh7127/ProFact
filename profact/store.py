@@ -33,6 +33,14 @@ CREATE TABLE IF NOT EXISTS versions (
     generation_id   TEXT,
     conversation_id TEXT
 );
+
+-- One HEAD per Git branch (branch-local HEADs). The legacy .profact/HEAD file
+-- is retained as a repo-wide "last active" pointer used only to seed the HEAD of
+-- a brand-new branch (carry-over from the branch point; see read_head).
+CREATE TABLE IF NOT EXISTS heads (
+    git_branch  TEXT PRIMARY KEY,
+    version_id  TEXT
+);
 """
 
 # Columns added after the initial schema; applied to existing DBs on connect.
@@ -98,7 +106,7 @@ def connect(repo_root: Path) -> sqlite3.Connection:
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
-    """Idempotently add columns introduced after the initial schema."""
+    """Idempotently upgrade DBs created by earlier profact versions."""
     existing = {row[1] for row in conn.execute("PRAGMA table_info(versions)")}
     if not existing:  # table not created yet (fresh DB)
         return
@@ -107,6 +115,12 @@ def _migrate(conn: sqlite3.Connection) -> None:
         if name not in existing:
             conn.execute(f"ALTER TABLE versions ADD COLUMN {name} {decl}")
             changed = True
+    # Branch-local HEADs were added after the initial schema; ensure the table
+    # exists for DBs that predate it. The old global .profact/HEAD is used to
+    # seed each branch on first use (see read_head), so this is non-destructive.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS heads (git_branch TEXT PRIMARY KEY, version_id TEXT)"
+    )
     if changed:
         conn.commit()
 
@@ -126,7 +140,44 @@ def read_object(repo_root: Path, digest: str) -> str | None:
     return path.read_text() if path.exists() else None
 
 
-def read_head(repo_root: Path) -> str | None:
+def read_head(repo_root: Path, branch: str, *, seed: bool = True) -> str | None:
+    """Return the HEAD version for ``branch``.
+
+    HEADs are branch-local: each Git branch has its own row in the ``heads``
+    table. If the branch has no HEAD yet and ``seed`` is True, fall back to the
+    repo-wide "last active" pointer (``.profact/HEAD``). This implements the
+    carry-over rule: a brand-new branch inherits the version you branched off
+    from, so new work on it chains onto that lineage (like Git branching).
+
+    Display commands pass ``seed=False`` so an untouched branch honestly reports
+    "no HEAD yet" instead of borrowing another branch's position.
+    """
+    with connect(repo_root) as conn:
+        row = conn.execute(
+            "SELECT version_id FROM heads WHERE git_branch = ?", (branch,)
+        ).fetchone()
+    if row and row["version_id"]:
+        return row["version_id"]
+    if not seed:
+        return None
+    return _read_global_head(repo_root)
+
+
+def write_head(repo_root: Path, branch: str, version_id: str) -> None:
+    """Set ``branch``'s HEAD and advance the repo-wide "last active" pointer."""
+    with connect(repo_root) as conn:
+        conn.execute(
+            """
+            INSERT INTO heads (git_branch, version_id) VALUES (?, ?)
+            ON CONFLICT(git_branch) DO UPDATE SET version_id = excluded.version_id
+            """,
+            (branch, version_id),
+        )
+        conn.commit()
+    _write_global_head(repo_root, version_id)
+
+
+def _read_global_head(repo_root: Path) -> str | None:
     path = head_path(repo_root)
     if not path.exists():
         return None
@@ -134,7 +185,7 @@ def read_head(repo_root: Path) -> str | None:
     return value or None
 
 
-def write_head(repo_root: Path, version_id: str) -> None:
+def _write_global_head(repo_root: Path, version_id: str) -> None:
     head_path(repo_root).write_text(version_id)
 
 
@@ -229,6 +280,82 @@ def list_versions(conn: sqlite3.Connection, git_branch: str) -> list[Version]:
         (git_branch,),
     ).fetchall()
     return [_row_to_version(row) for row in rows]
+
+
+def list_branch_versions(
+    conn: sqlite3.Connection, git_branch: str, head: str | None = None
+) -> list[Version]:
+    """Versions visible on ``git_branch``: those created on it plus their
+    ancestors (which may have been created on a parent branch and carried over).
+
+    This is the branch's slice of the shared DAG. Under the carry-over rule, a
+    branch's early history lives in rows whose ``git_branch`` is the parent
+    branch, so a plain ``git_branch =`` filter would drop it — we walk parents to
+    reattach the inherited trunk.
+
+    If ``head`` is given, its ancestry is also included. This keeps the view
+    consistent after a confirmed cross-branch checkout, where the current HEAD
+    can point at a version that has no descendant created on this branch yet.
+    """
+    result: dict[str, Version] = {}
+    stack: list[str] = []
+    for row in conn.execute(
+        "SELECT * FROM versions WHERE git_branch = ?", (git_branch,)
+    ):
+        version = _row_to_version(row)
+        result[version.id] = version
+        if version.parent_id:
+            stack.append(version.parent_id)
+    if head:
+        stack.append(head)
+    while stack:
+        parent_id = stack.pop()
+        if parent_id in result:
+            continue
+        version = get_version(conn, parent_id)
+        if version is None:
+            continue
+        result[parent_id] = version
+        if version.parent_id:
+            stack.append(version.parent_id)
+    return sorted(result.values(), key=lambda v: v.timestamp)
+
+
+def all_versions(conn: sqlite3.Connection) -> list[Version]:
+    rows = conn.execute("SELECT * FROM versions ORDER BY timestamp").fetchall()
+    return [_row_to_version(row) for row in rows]
+
+
+def referenced_object_ids(conn: sqlite3.Connection) -> set[str]:
+    """Every object digest still referenced by a version (prompt/response/diff)."""
+    refs: set[str] = set()
+    for row in conn.execute(
+        "SELECT prompt_ref, response_ref, diff_ref FROM versions"
+    ):
+        refs.update(value for value in row if value)
+    return refs
+
+
+def heads_pointing_to(conn: sqlite3.Connection, version_id: str) -> list[str]:
+    return [
+        row["git_branch"]
+        for row in conn.execute(
+            "SELECT git_branch FROM heads WHERE version_id = ?", (version_id,)
+        )
+    ]
+
+
+def reparent_children(conn: sqlite3.Connection, old_parent: str, new_parent: str | None) -> None:
+    conn.execute(
+        "UPDATE versions SET parent_id = ? WHERE parent_id = ?",
+        (new_parent, old_parent),
+    )
+    conn.commit()
+
+
+def delete_version(conn: sqlite3.Connection, version_id: str) -> None:
+    conn.execute("DELETE FROM versions WHERE id = ?", (version_id,))
+    conn.commit()
 
 
 def _row_to_version(row: sqlite3.Row) -> Version:

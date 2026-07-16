@@ -15,7 +15,7 @@ def _make_prompt(repo: Path, *, prompt: str, mutate: Callable[[], None]) -> stor
     """Mimic a finalized capture turn: snapshot before, mutate, snapshot after."""
     branch = git_ops.current_branch(repo)
     tree_before = git_ops.write_tree(repo)
-    parent = store.read_head(repo) or None
+    parent = store.read_head(repo, branch)
     prompt_ref = store.write_object(repo, prompt)
     mutate()
     tree_after = git_ops.write_tree(repo)
@@ -34,7 +34,7 @@ def _make_prompt(repo: Path, *, prompt: str, mutate: Callable[[], None]) -> stor
             diff_ref=diff_ref,
             model="claude-test",
         )
-    store.write_head(repo, version.id)
+    store.write_head(repo, branch, version.id)
     return version
 
 
@@ -102,7 +102,7 @@ def test_checkout_branching_never_loses_work(git_repo: Path, monkeypatch) -> Non
     # Go back to the anchor (v1). button.py should disappear from the working dir.
     back = runner.invoke(app, ["checkout", "v1"])
     assert back.exit_code == 0, back.output
-    assert store.read_head(git_repo) == "v1"
+    assert store.read_head(git_repo, "main") == "v1"
     assert not button.exists()
 
     # New prompt from v1 -> v3, a separate branch (parent is v1, not v2).
@@ -124,7 +124,7 @@ def test_checkout_branching_never_loses_work(git_repo: Path, monkeypatch) -> Non
     to_blue = runner.invoke(app, ["checkout", v2.id])
     assert to_blue.exit_code == 0, to_blue.output
     assert button.read_text() == "color = 'blue'\n"
-    assert store.read_head(git_repo) == v2.id
+    assert store.read_head(git_repo, "main") == v2.id
 
     # Prove v3 survived: checking it back out restores green.
     to_green = runner.invoke(app, ["checkout", v3.id])
@@ -155,6 +155,31 @@ def test_checkout_autocheckpoints_uncommitted_work(git_repo: Path, monkeypatch) 
     assert len(checkpoints) == 1
     runner.invoke(app, ["checkout", checkpoints[0].id])
     assert (git_repo / "config.py").read_text() == "DEBUG = False\n"
+
+
+def test_graph_renders_ascii_dag_plain_log_is_flat(git_repo: Path, monkeypatch) -> None:
+    monkeypatch.chdir(git_repo)
+    button = git_repo / "button.py"
+    _make_prompt(git_repo, prompt="blue", mutate=lambda: button.write_text("blue\n"))
+    runner.invoke(app, ["checkout", "v1"])
+    _make_prompt(git_repo, prompt="green", mutate=lambda: button.write_text("green\n"))
+
+    # --graph: real DAG with node markers, a convergence connector, and a footer.
+    graph = runner.invoke(app, ["log", "--graph"])
+    assert graph.exit_code == 0, graph.output
+    assert "DAG for branch 'main'" in graph.output
+    assert "*" in graph.output  # node marker
+    assert "/" in graph.output  # lanes converging on the shared parent (v1)
+    assert "branch points: v1" in graph.output
+
+    # plain log: flat list — no header, no graph glyphs, rows don't start with '*'.
+    plain = runner.invoke(app, ["log"])
+    assert plain.exit_code == 0, plain.output
+    assert "DAG for branch" not in plain.output
+    assert "/" not in plain.output
+    for line in plain.output.splitlines():
+        if line.strip():
+            assert not line.lstrip().startswith("*")
 
 
 def test_log_path_shows_only_head_ancestry(git_repo: Path, monkeypatch) -> None:

@@ -90,4 +90,4 @@ def test_proxy_creates_exactly_one_version(git_repo: Path):
     assert store.read_object(repo_root, version.prompt_ref) == "create a login page"
     assert version.response_ref is not None
     assert "Hello world" in store.read_object(repo_root, version.response_ref)
-    assert store.read_head(repo_root) == version.id  # HEAD advanced on close
+    assert store.read_head(repo_root, "main") == version.id  # HEAD advanced on close

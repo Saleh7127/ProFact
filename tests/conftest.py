@@ -32,5 +32,5 @@ def git_repo(tmp_path: Path) -> Path:
             tree_after=tree,
             commit_hash=git_ops.head_commit(tmp_path),
         )
-    store.write_head(tmp_path, anchor.id)
+    store.write_head(tmp_path, git_ops.current_branch(tmp_path), anchor.id)
     return tmp_path

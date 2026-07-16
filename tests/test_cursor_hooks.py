@@ -46,7 +46,7 @@ def test_full_turn_creates_one_finalized_version(git_repo: Path) -> None:
     assert store.read_object(git_repo, version.prompt_ref) == "add a feature"
     assert store.read_object(git_repo, version.response_ref) == "Added the feature."
     assert "feature.py" in store.read_object(git_repo, version.diff_ref)
-    assert store.read_head(git_repo) == version.id
+    assert store.read_head(git_repo, "main") == version.id
 
 
 def test_second_prompt_chains_and_closes_previous(git_repo: Path) -> None:
@@ -156,6 +156,47 @@ def test_checkout_before_start_keeps_hooks_alive(git_repo: Path, monkeypatch) ->
     fwd = runner.invoke(app, ["checkout", "v2"])
     assert fwd.exit_code == 0, fwd.output
     assert script.exists()  # hooks still alive -> capture keeps working
+
+
+def test_checkout_after_start_makes_no_phantom_checkpoint(git_repo: Path, monkeypatch) -> None:
+    """Regression: `start` gitignores the hook files, but checking out a pre-start
+    version reverts .gitignore. The snapshot must still exclude the (undeletable)
+    hook files, or checkout would round-trip to a different tree and invent a
+    phantom checkpoint from work the user never did."""
+    monkeypatch.chdir(git_repo)
+    runner.invoke(app, ["start"])
+    cursor_hooks.handle(git_repo, _event("beforeSubmitPrompt", prompt="edit"))
+    (git_repo / "x.py").write_text("y = 1\n")
+    cursor_hooks.handle(git_repo, _event("stop"))
+
+    runner.invoke(app, ["checkout", "v1"])  # reverts .gitignore (predates .cursor)
+    result = runner.invoke(app, ["checkout", "v2"])
+    assert result.exit_code == 0, result.output
+    assert "checkpoint" not in result.output.lower()  # no phantom work
+
+    with store.connect(git_repo) as conn:
+        checkpoints = [
+            v for v in store.list_versions(conn, "main") if v.type == "checkpoint"
+        ]
+    assert checkpoints == []
+
+
+def test_write_tree_excludes_hook_infra_regardless_of_gitignore(
+    git_repo: Path, monkeypatch
+) -> None:
+    from profact import git_ops
+
+    monkeypatch.chdir(git_repo)
+    hooks_dir = git_repo / ".cursor" / "hooks"
+    hooks_dir.mkdir(parents=True)
+    (hooks_dir / "profact-hook.sh").write_text("#!/usr/bin/env bash\n")
+    (git_repo / ".cursor" / "hooks.json").write_text("{}\n")
+
+    # Even with NO .gitignore entry for them, the infra must never enter a tree.
+    tree = git_ops.write_tree(git_repo)
+    files = git_ops.list_tree_files(git_repo, tree)
+    assert not any(f.startswith(".cursor/hooks") for f in files)
+    assert not any(f.startswith(".profact") for f in files)
 
 
 def test_start_preserves_existing_unrelated_hooks(git_repo: Path, monkeypatch) -> None:

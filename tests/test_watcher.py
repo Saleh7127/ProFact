@@ -65,7 +65,7 @@ def test_human_edit_with_no_open_turn_creates_human_version(git_repo: Path):
     assert len(humans) == 1
     human = humans[0]
     assert human.parent_id is not None
-    assert store.read_head(git_repo) == human.id
+    assert store.read_head(git_repo, "main") == human.id
     assert "manual.py" in store.read_object(git_repo, human.diff_ref)
 
 

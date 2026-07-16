@@ -61,6 +61,17 @@ def write_tree(repo_root: Path, index_file: Path | None = None) -> str:
     env = {**os.environ, "GIT_INDEX_FILE": str(index_file)}
     try:
         _run(["add", "-A"], repo_root, env=env)
+        # Drop profact's own capture machinery from the snapshot unconditionally.
+        # .gitignore is itself versioned, so checking out a version created before
+        # `profact start` reverts the ignore rules; `git add -A` would then
+        # capture the (hard-protected, undeletable) hook files, making every
+        # snapshot drift — phantom checkpoints and machine-specific hook scripts
+        # leaking into history. --ignore-unmatch keeps this a no-op otherwise.
+        _run(
+            ["rm", "-r", "--cached", "--ignore-unmatch", "--", *_INFRA_PATHS],
+            repo_root,
+            env=env,
+        )
         return _run(["write-tree"], repo_root, env=env)
     finally:
         if index_file.exists():
@@ -76,15 +87,25 @@ def list_tree_files(repo_root: Path, tree: str) -> list[str]:
     return out.splitlines() if out else []
 
 
-# profact's own infrastructure: never deleted by checkout, even if a checked-out
-# version predates these paths or reverts the .gitignore that hides them.
+# profact's own infrastructure: never deleted by checkout, and never captured
+# into a snapshot, even if a checked-out version predates these paths or reverts
+# the .gitignore that hides them.
 _PROTECTED_PREFIXES = (".profact/", ".cursor/hooks/")
 _PROTECTED_FILES = (".cursor/hooks.json",)
+
+# The protected paths as plain repo-relative paths, removed from every snapshot
+# index so they never enter a tree regardless of the current .gitignore state.
+_INFRA_PATHS = (".profact", ".cursor/hooks", ".cursor/hooks.json")
 
 
 def _is_protected(rel: str) -> bool:
     rel = rel.replace("\\", "/")
     return rel in _PROTECTED_FILES or any(rel.startswith(p) for p in _PROTECTED_PREFIXES)
+
+
+def is_infra_path(rel: str) -> bool:
+    """True if ``rel`` is one of profact's own capture-machinery paths."""
+    return _is_protected(rel)
 
 
 def checkout_tree(
