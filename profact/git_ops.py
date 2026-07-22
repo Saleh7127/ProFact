@@ -78,13 +78,68 @@ def write_tree(repo_root: Path, index_file: Path | None = None) -> str:
             index_file.unlink()
 
 
-def diff_trees(repo_root: Path, before: str, after: str) -> str:
-    return _run(["diff", before, after], repo_root)
+def diff_trees(
+    repo_root: Path,
+    before: str,
+    after: str,
+    *,
+    stat: bool = False,
+    name_only: bool = False,
+) -> str:
+    args = ["diff"]
+    if stat:
+        args.append("--stat")
+    if name_only:
+        args.append("--name-only")
+    args += [before, after]
+    return _run(args, repo_root)
 
 
 def list_tree_files(repo_root: Path, tree: str) -> list[str]:
     out = _run(["ls-tree", "-r", "--name-only", tree], repo_root)
     return out.splitlines() if out else []
+
+
+def path_in_tree(repo_root: Path, tree: str, rel_path: str) -> bool:
+    """True if ``rel_path`` names a blob in ``tree``."""
+    out = _run(["ls-tree", tree, "--", rel_path], repo_root)
+    return bool(out.strip())
+
+
+def commit_tree(
+    repo_root: Path,
+    tree: str,
+    *,
+    message: str,
+    parent: str | None = None,
+    date: str | None = None,
+) -> str:
+    """Create a commit object wrapping an existing ``tree`` and return its SHA.
+
+    Used by `profact blame` to replay the prompt lineage as a throwaway commit
+    chain so Git's own blame engine can attribute lines. The commits are never
+    referenced by any branch — they are unreachable objects that Git will garbage
+    collect — so they never touch the user's real history.
+    """
+    env = {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "profact",
+        "GIT_AUTHOR_EMAIL": "profact@localhost",
+        "GIT_COMMITTER_NAME": "profact",
+        "GIT_COMMITTER_EMAIL": "profact@localhost",
+    }
+    if date:
+        env["GIT_AUTHOR_DATE"] = date
+        env["GIT_COMMITTER_DATE"] = date
+    args = ["commit-tree", tree, "-m", message]
+    if parent:
+        args += ["-p", parent]
+    return _run(args, repo_root, env=env)
+
+
+def blame_porcelain(repo_root: Path, commit: str, rel_path: str) -> str:
+    """Run ``git blame --line-porcelain`` for ``rel_path`` at ``commit``."""
+    return _run(["blame", "--line-porcelain", commit, "--", rel_path], repo_root)
 
 
 # profact's own infrastructure: never deleted by checkout, and never captured

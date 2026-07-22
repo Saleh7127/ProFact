@@ -215,6 +215,202 @@ def show(version_id: str) -> None:
 
 
 @app.command()
+def diff(
+    a: str = typer.Argument(
+        None, help="First version id (or HEAD). Omit to diff HEAD against the working tree."
+    ),
+    b: str = typer.Argument(
+        None, help="Second version id (or HEAD). Omit to diff <a> against the working tree."
+    ),
+    stat: bool = typer.Option(False, "--stat", help="Show a diffstat summary instead of the full diff."),
+    name_only: bool = typer.Option(False, "--name-only", help="Show only changed file names."),
+    exit_code: bool = typer.Option(
+        False, "--exit-code", help="Exit 1 if there are differences, 0 if none (for scripts)."
+    ),
+) -> None:
+    """Diff two versions, a version against the working tree, or (no args) HEAD
+    against the working tree. Read-only; works across git branches."""
+    repo_root = _resolve_repo_root()
+    _require_init(repo_root)
+    branch = git_ops.current_branch(repo_root)
+
+    if stat and name_only:
+        typer.echo("error: --stat and --name-only are mutually exclusive", err=True)
+        raise typer.Exit(2)
+
+    with store.connect(repo_root) as conn:
+        if a is None:
+            before_tree, before_label = _head_tree(repo_root, conn, branch)
+            after_tree, after_label = _working_tree(repo_root)
+        elif b is None:
+            before_tree, before_label = _resolve_diff_tree(repo_root, conn, branch, a)
+            after_tree, after_label = _working_tree(repo_root)
+        else:
+            before_tree, before_label = _resolve_diff_tree(repo_root, conn, branch, a)
+            after_tree, after_label = _resolve_diff_tree(repo_root, conn, branch, b)
+
+    output = git_ops.diff_trees(
+        repo_root, before_tree, after_tree, stat=stat, name_only=name_only
+    )
+    typer.echo(f"diff {before_label} -> {after_label}")
+    has_changes = bool(output.strip())
+    typer.echo(output if has_changes else "(no differences)")
+    if exit_code and has_changes:
+        raise typer.Exit(1)
+
+
+def _working_tree(repo_root: Path) -> tuple[str, str]:
+    return git_ops.write_tree(repo_root), "working tree"
+
+
+def _head_tree(repo_root: Path, conn, branch: str) -> tuple[str, str]:
+    head_id = store.read_head(repo_root, branch, seed=False)
+    if not head_id:
+        typer.echo("error: no HEAD on this branch to diff against", err=True)
+        raise typer.Exit(1)
+    return _resolve_diff_tree(repo_root, conn, branch, head_id)
+
+
+def _resolve_diff_tree(repo_root: Path, conn, branch: str, token: str) -> tuple[str, str]:
+    version_id = token
+    if token.upper() == "HEAD":
+        version_id = store.read_head(repo_root, branch, seed=False)
+        if not version_id:
+            typer.echo("error: no HEAD on this branch", err=True)
+            raise typer.Exit(1)
+    version = store.get_version(conn, version_id)
+    if version is None:
+        typer.echo(f"error: no such version '{token}'", err=True)
+        raise typer.Exit(1)
+    if version.tree_after is None:
+        # Only an open (in-progress) prompt legitimately lacks a finalized tree;
+        # for any other type a NULL tree_after means inconsistent data.
+        if version.type == "prompt":
+            typer.echo(
+                f"note: {version.id} is an open turn; using its start snapshot", err=True
+            )
+        else:
+            typer.echo(
+                f"error: {version.id} [{version.type}] has no finalized snapshot", err=True
+            )
+            raise typer.Exit(1)
+    tree = version.tree_after or version.tree_before
+    return tree, f"{version.id} [{version.type}]"
+
+
+@app.command()
+def blame(
+    file: str = typer.Argument(..., help="Path to the file to blame."),
+    version_id: str = typer.Argument(
+        None, help="Version to blame at (or HEAD). Defaults to the branch HEAD."
+    ),
+    line: str = typer.Option(
+        None, "-L", "--line", help="Restrict to a line range: N or N:M."
+    ),
+    show: bool = typer.Option(
+        False, "--show", help="Expand each contributing prompt, response, and hunk."
+    ),
+) -> None:
+    """Attribute each line of a file to the prompt (version) that produced it.
+
+    Traces every line back to its intent: an AI prompt, a human edit, or
+    pre-existing code. Read-only; blames a version's snapshot, not unsaved edits.
+    """
+    from . import blame as blame_mod
+
+    repo_root = _resolve_repo_root()
+    _require_init(repo_root)
+    branch = git_ops.current_branch(repo_root)
+
+    target_id = _resolve_blame_version(repo_root, branch, version_id)
+
+    try:
+        with store.connect(repo_root) as conn:
+            result = blame_mod.blame_file(
+                repo_root, conn, file=file, version_id=target_id
+            )
+        if line:
+            start, end = blame_mod.parse_line_range(line)
+            result.lines = blame_mod.slice_range(result.lines, start, end)
+    except blame_mod.BlameError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(1)
+    except git_ops.GitError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(1)
+
+    if not result.lines:
+        typer.echo("(no lines to blame)")
+        return
+
+    typer.echo(f"blame {result.rel_path} @ {result.target.id} [{result.target.type}]")
+    typer.echo(blame_mod.render_blame(repo_root, result))
+    if show:
+        typer.echo("")
+        typer.echo(blame_mod.render_show(repo_root, result))
+
+
+@app.command()
+def why(
+    target: str = typer.Argument(
+        ..., help="A file:line reference, e.g. app.py:42."
+    ),
+    version_id: str = typer.Argument(
+        None, help="Version to blame at (or HEAD). Defaults to the branch HEAD."
+    ),
+) -> None:
+    """Explain a single line: the full prompt, response, and hunk behind it.
+
+    Sugar for `profact blame <file> -L <line>:<line> --show`.
+    """
+    from . import blame as blame_mod
+
+    if ":" not in target:
+        typer.echo("error: expected <file>:<line> (e.g. app.py:42)", err=True)
+        raise typer.Exit(2)
+    file, _, lineno = target.rpartition(":")
+
+    repo_root = _resolve_repo_root()
+    _require_init(repo_root)
+    branch = git_ops.current_branch(repo_root)
+    target_id = _resolve_blame_version(repo_root, branch, version_id)
+
+    try:
+        start, end = blame_mod.parse_line_range(lineno)
+        with store.connect(repo_root) as conn:
+            result = blame_mod.blame_file(
+                repo_root, conn, file=file, version_id=target_id
+            )
+        result.lines = blame_mod.slice_range(result.lines, start, end)
+    except blame_mod.BlameError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(1)
+    except git_ops.GitError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(1)
+
+    if not result.lines:
+        typer.echo(f"error: no line {lineno} in {result.rel_path} @ {result.target.id}", err=True)
+        raise typer.Exit(1)
+
+    typer.echo(f"why {result.rel_path}:{lineno} @ {result.target.id}\n")
+    typer.echo(blame_mod.render_blame(repo_root, result))
+    typer.echo("")
+    typer.echo(blame_mod.render_show(repo_root, result))
+
+
+def _resolve_blame_version(repo_root: Path, branch: str, token: str | None) -> str:
+    """Resolve a blame target token to a version id (HEAD-aware)."""
+    if token is None or token.upper() == "HEAD":
+        head = store.read_head(repo_root, branch, seed=False)
+        if not head:
+            typer.echo("error: no HEAD on this branch to blame", err=True)
+            raise typer.Exit(1)
+        return head
+    return token
+
+
+@app.command()
 def checkout(
     version_id: str,
     force: bool = typer.Option(

@@ -68,6 +68,95 @@ def test_show_renders_prompt_response_and_diff(git_repo: Path, monkeypatch) -> N
     assert "greet.py" in result.output  # diff mentions the new file
 
 
+def test_diff_between_two_versions(git_repo: Path, monkeypatch) -> None:
+    monkeypatch.chdir(git_repo)
+    _make_prompt(git_repo, prompt="add x", mutate=lambda: (git_repo / "x.py").write_text("x=1\n"))
+    _make_prompt(git_repo, prompt="add y", mutate=lambda: (git_repo / "y.py").write_text("y=1\n"))
+
+    result = runner.invoke(app, ["diff", "v2", "v3"])
+    assert result.exit_code == 0, result.output
+    assert "diff v2 [prompt] -> v3 [prompt]" in result.output
+    assert "y.py" in result.output       # added between v2 and v3
+    assert "x.py" not in result.output   # unchanged
+
+
+def test_diff_single_arg_against_working_tree(git_repo: Path, monkeypatch) -> None:
+    monkeypatch.chdir(git_repo)
+    _make_prompt(git_repo, prompt="add x", mutate=lambda: (git_repo / "x.py").write_text("x=1\n"))
+    (git_repo / "x.py").write_text("x=2\n")  # manual edit after v2
+
+    result = runner.invoke(app, ["diff", "v2"])
+    assert result.exit_code == 0, result.output
+    assert "working tree" in result.output
+    assert "x.py" in result.output
+
+
+def test_diff_no_arg_head_vs_working_tree(git_repo: Path, monkeypatch) -> None:
+    monkeypatch.chdir(git_repo)
+    _make_prompt(git_repo, prompt="add x", mutate=lambda: (git_repo / "x.py").write_text("x=1\n"))
+
+    clean = runner.invoke(app, ["diff"])
+    assert clean.exit_code == 0, clean.output
+    assert "(no differences)" in clean.output
+
+    (git_repo / "x.py").write_text("x=2\n")
+    dirty = runner.invoke(app, ["diff"])
+    assert dirty.exit_code == 0, dirty.output
+    assert "x.py" in dirty.output
+
+
+def test_diff_stat_and_name_only(git_repo: Path, monkeypatch) -> None:
+    monkeypatch.chdir(git_repo)
+    _make_prompt(git_repo, prompt="add x", mutate=lambda: (git_repo / "x.py").write_text("x=1\n"))
+    _make_prompt(git_repo, prompt="add y", mutate=lambda: (git_repo / "y.py").write_text("y=1\n"))
+
+    stat = runner.invoke(app, ["diff", "v2", "v3", "--stat"])
+    assert stat.exit_code == 0, stat.output
+    assert "y.py" in stat.output
+
+    names = runner.invoke(app, ["diff", "v2", "v3", "--name-only"])
+    assert names.exit_code == 0, names.output
+    assert "y.py" in names.output
+    assert "@@" not in names.output  # summary only, no hunks
+
+
+def test_diff_head_alias_and_unknown_errors(git_repo: Path, monkeypatch) -> None:
+    monkeypatch.chdir(git_repo)
+    _make_prompt(git_repo, prompt="add x", mutate=lambda: (git_repo / "x.py").write_text("x=1\n"))
+    (git_repo / "x.py").write_text("x=2\n")
+
+    head = runner.invoke(app, ["diff", "HEAD"])
+    assert head.exit_code == 0, head.output
+    assert "x.py" in head.output
+
+    bad = runner.invoke(app, ["diff", "v999", "v2"])
+    assert bad.exit_code == 1
+    assert "no such version" in bad.output
+
+
+def test_diff_stat_and_name_only_mutually_exclusive(git_repo: Path, monkeypatch) -> None:
+    monkeypatch.chdir(git_repo)
+    _make_prompt(git_repo, prompt="add x", mutate=lambda: (git_repo / "x.py").write_text("x=1\n"))
+    result = runner.invoke(app, ["diff", "v1", "v2", "--stat", "--name-only"])
+    assert result.exit_code == 2
+    assert "mutually exclusive" in result.output
+
+
+def test_diff_exit_code_flag(git_repo: Path, monkeypatch) -> None:
+    monkeypatch.chdir(git_repo)
+    _make_prompt(git_repo, prompt="add x", mutate=lambda: (git_repo / "x.py").write_text("x=1\n"))
+
+    # differences present -> exit 1 (but still prints the diff)
+    changed = runner.invoke(app, ["diff", "v1", "v2", "--exit-code"])
+    assert changed.exit_code == 1
+    assert "x.py" in changed.output
+
+    # no differences -> exit 0
+    same = runner.invoke(app, ["diff", "v2", "v2", "--exit-code"])
+    assert same.exit_code == 0
+    assert "(no differences)" in same.output
+
+
 def test_show_unknown_version_errors(git_repo: Path, monkeypatch) -> None:
     monkeypatch.chdir(git_repo)
     result = runner.invoke(app, ["show", "v999"])

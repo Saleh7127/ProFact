@@ -4,7 +4,7 @@
 > collects directions to grow the current MVP into a full product and a strong
 > thesis. The MVP already delivers: capture (Cursor hooks + Claude proxy),
 > content-addressed storage, a prompt DAG with per-branch carry-over HEADs, safe
-> `checkout`, `log/show/status`, `note`, and `doctor`.
+> `checkout`, `log/show/status/diff`, `blame`/`why`, `note`, and `doctor`.
 >
 > Ideas were drafted here and cross-checked against a GPT-5.5 brainstorm
 > ([feature brainstorm](ee5efa3b-3992-419d-b8c7-78b216e6fe66)).
@@ -43,8 +43,9 @@ Three bets, in order:
 Effort/Impact are rough (Low / Med / High). ★ = strong thesis contribution.
 
 ### 3.1 Core version-control UX
-- **`profact diff <a> <b>`** — compare any two versions (trees, prompts,
-  responses), not just one version's own diff. *Impact: High · Effort: Med.*
+- **`profact diff <a> <b>`** — ✅ **implemented.** Compare any two versions, a
+  version against the working tree (`diff <a>`), or HEAD against the working tree
+  (`diff`); `--stat` / `--name-only`; read-only and cross-branch. *Impact: High · Effort: Med.*
 - **`profact tag <id> <label>`** — lightweight labels (`working`, `buggy`,
   `demo`, `regression-source`). *Impact: Med · Effort: Low.*
 - **Named prompt-branches** — name divergent prompt lines independently of Git
@@ -61,8 +62,12 @@ Effort/Impact are rough (Low / Med / High). ★ = strong thesis contribution.
   (extends today's `doctor`). *Impact: Med · Effort: Med.*
 
 ### 3.2 Navigation & discovery
-- **`profact blame <file>`** — which prompt introduced each line/hunk. The
-  flagship "why is this code here?" feature. ★ *Impact: Very High · Effort: High.*
+- **`profact blame <file>`** — ✅ **implemented.** Attributes each line to the
+  version/prompt that last produced it (Tier 1), labels honest origins —
+  AI prompt / human edit / pre-existing (Tier 3), and `--show` / `profact why
+  <file>:<line>` expands the full prompt + response excerpt + hunk (Tier 2).
+  Blames any historical version and follows branch ancestry; reuses Git's blame
+  engine over a throwaway synthetic-commit replay of the lineage. ★ *Impact: Very High · Effort: High.*
 - **`profact bisect -- <test cmd>`** — binary-search the prompt DAG to find the
   version that broke a test. *Impact: Very High · Effort: Med.*
 - **Line-origin search** — given a line/regex, find the version that added,

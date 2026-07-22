@@ -164,6 +164,21 @@ def test_log_shows_git_branch_column(git_repo: Path, monkeypatch) -> None:
     assert "(experiment)" in result.output
 
 
+def test_diff_works_across_branches(git_repo: Path, monkeypatch) -> None:
+    monkeypatch.chdir(git_repo)
+    f = git_repo / "app.py"
+    _prompt(git_repo, text="two", mutate=lambda: f.write_text("2\n"))  # v2 on main
+
+    _git(["checkout", "-b", "experiment"], git_repo)
+    v_exp = _prompt(git_repo, text="exp", mutate=lambda: f.write_text("exp\n"))  # v3 on experiment
+
+    # From main, diffing against an experiment-only version is allowed (read-only).
+    _git(["checkout", "main"], git_repo)
+    result = runner.invoke(app, ["diff", "v2", v_exp.id])
+    assert result.exit_code == 0, result.output
+    assert "app.py" in result.output
+
+
 def test_untouched_branch_reports_no_head(git_repo: Path, monkeypatch) -> None:
     monkeypatch.chdir(git_repo)
     _git(["checkout", "-b", "fresh"], git_repo)

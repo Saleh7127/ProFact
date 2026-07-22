@@ -191,6 +191,9 @@ These read from `store` + `git_ops` and work for **any** adapter, so they are bu
 profact init                    # Phase 1
 profact log [--graph] [--path]  # versions on the CURRENT git branch; --graph shows the DAG + HEAD; --path = HEAD ancestry only
 profact show <id>               # full prompt, response, diff, confidence (warns on 'uncertain')
+profact diff [<a> [<b>]] [--stat|--name-only] [--exit-code]  # compare two versions, a version vs working tree, or (no args) HEAD vs working tree; read-only, cross-branch OK
+profact blame <file> [<id>] [-L N:M] [--show]  # attribute each line to the prompt/version that last wrote it; --show expands prompt+response+hunk; blames any version, follows branch ancestry
+profact why <file>:<line> [<id>]  # sugar for `blame <file> -L line:line --show`: full intent behind one line
 profact checkout <id> [-f]      # §8 — auto-checkpoint, restore tree, move HEAD; preserves ignored files; prompts before a cross-branch target (--force skips)
 profact status                  # current HEAD id, branch, dirty-vs-HEAD, any open/in-progress version
 profact doctor [--fix]          # report/prune history artifacts: phantom checkpoints, orphaned objects (dangling turns report-only)
@@ -234,7 +237,7 @@ Git Notes integration (§10, optional, fires only on commit — document, don't 
 - Mid-session pull of a branch with foreign history (Decision I)
 - DB compaction / pruning for very long sessions (Decision J)
 - Semantic prompt diffing, embeddings, `profact diff <id1> <id2>`
-- `profact replay`, `profact blame`
+- `profact replay` (`profact blame`/`why` are now implemented — see the CLI list)
 - HTTPS/SSL handling for restricted corporate networks beyond clean forwarding to `api.anthropic.com`
 - Any GUI or web dashboard
 

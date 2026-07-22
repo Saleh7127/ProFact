@@ -30,17 +30,18 @@ and installs the dev dependency (`pytest`).
 pytest -q
 ```
 
-Expected: **42 passed**. Coverage by area:
+Expected: **59 passed**. Coverage by area:
 
 | File | What it proves |
 |------|----------------|
 | `test_aggregator.py` | turn-boundary rule (1 user prompt = 1 version) |
 | `test_proxy.py` | Claude proxy forwards + parses SSE, opens one version |
 | `test_watcher.py` | quiet-period finalize + `human` version creation |
-| `test_cli.py` | `log`/`show`/`status`/`checkout`, full branching DoD |
+| `test_cli.py` | `log`/`show`/`status`/`checkout`/`diff`, full branching DoD |
 | `test_cursor_hooks.py` | Cursor hook events → versions; `start` installs hooks |
 | `test_phase7.py` | `note` (Git Notes) and `start --claude` wiring |
 | `test_branch_heads.py` | per-branch HEADs, carry-over, cross-branch checkout prompt, `doctor` |
+| `test_blame.py` | line→version attribution, reverts/re-adds, branch ancestry, `blame`/`why` |
 
 ---
 
@@ -78,6 +79,17 @@ profact log                 # v2 (prompt) on top of v1 (anchor)
 profact show v2             # prompt, response, diff
 profact checkout v1         # button.py disappears (restored to anchor)
 profact log --graph         # see the DAG + branch tips
+```
+
+Compare versions with `profact diff` (read-only; works across git branches):
+
+```bash
+profact diff v1 v2          # changes to turn v1 into v2
+profact diff v2             # what changed since v2 (v2 vs current working tree)
+profact diff                # HEAD vs working tree (uncommitted work), like `git diff`
+profact diff v1 v2 --stat   # diffstat summary
+profact diff v1 v2 --name-only
+profact diff HEAD           # 'HEAD' is accepted as a version alias
 ```
 
 Branch backward and confirm nothing is lost:
@@ -171,7 +183,53 @@ directly with no prompt.
 
 ---
 
-## 5. Real capture path A — Cursor (primary)
+## 5. Prompt blame — trace each line back to its intent
+
+`profact blame <file>` answers "why is this line here?" by attributing every
+line to the **version (and prompt) that last wrote it** — the AI-native analogue
+of `git blame`, but the "commit" is a prompt.
+
+Continuing in `/tmp/pf-demo` (from section 3, `button.py` was written by a
+prompt version), blame it:
+
+```bash
+profact blame button.py
+```
+
+```
+blame button.py @ v2 [prompt]
+v2    prompt 2026-07-22 make the button blue              1| color = 'blue'
+```
+
+Each row is: `version · type · date · prompt summary (origin) · line# | code`.
+Origins are honest (Tier 3): a prompt shows its text, pre-existing lines show
+`pre-existing (before profact)` (attributed to the `anchor`), and manual edits
+show `human edit (no prompt)`.
+
+Drill into a single line's full intent (Tier 2) — the prompt, a response
+excerpt, and the exact hunk that introduced it:
+
+```bash
+profact blame button.py --show     # expand every contributing version
+profact why button.py:1            # sugar for one line: blame -L 1:1 --show
+profact blame button.py -L 1:1     # restrict to a line range (N or N:M)
+```
+
+Blame is read-only and time-travels: pass a version to blame a **historical**
+snapshot (`profact blame button.py v2`), and it follows the branch ancestry, so
+carried-over trunk lines are credited to the branch that actually wrote them.
+
+> Blame attributes a version's **snapshot**, not unsaved edits in your working
+> tree. To blame current work, checkpoint/finalize it first.
+
+Under the hood profact replays the target's lineage as a throwaway chain of Git
+commit objects over the stored trees and runs Git's own blame engine on it, so
+reverts, re-additions, and moved lines all resolve correctly. Those commits are
+unreachable and never enter your real history.
+
+---
+
+## 6. Real capture path A — Cursor (primary)
 
 This is the intended day-to-day mode.
 
@@ -202,7 +260,7 @@ profact log                               # a new prompt version appears
 
 ---
 
-## 6. Real capture path B — Claude Code (secondary)
+## 7. Real capture path B — Claude Code (secondary)
 
 Requires the `claude` CLI installed and on PATH.
 
@@ -218,7 +276,7 @@ tears the proxy/watcher down when `claude` exits. Inspect with `profact log` /
 
 ---
 
-## 7. Optional — link a version to a Git commit
+## 8. Optional — link a version to a Git commit
 
 ```bash
 git commit -m "ship login"
@@ -228,7 +286,7 @@ git notes --ref=profact show HEAD
 
 ---
 
-## 8. Maintenance — `profact doctor`
+## 9. Maintenance — `profact doctor`
 
 `doctor` scans `.profact/history.db` for safe-to-remove artifacts and reports
 them. It changes nothing unless you pass `--fix`.
@@ -327,5 +385,6 @@ recorded real source changes.
 
 ### Out of scope for the MVP (by design)
 Copilot/ChatGPT adapters, shared/mergeable history, mid-session pull of a
-foreign branch, semantic prompt diffing / `profact diff`, `replay`/`blame`, and
-any GUI. The architecture leaves room for these but does not implement them.
+foreign branch, semantic prompt diffing, `replay`, and any GUI. (`profact diff`
+and `profact blame`/`why` are now implemented — see sections 3 and 5.) The
+architecture leaves room for the rest but does not implement them.
