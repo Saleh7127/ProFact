@@ -189,11 +189,13 @@ Build `watcher.py` using `watchfiles`. When the aggregator closes a turn, begin 
 These read from `store` + `git_ops` and work for **any** adapter, so they are built first.
 ```bash
 profact init                    # Phase 1
-profact log [--graph] [--path]  # versions on the CURRENT git branch; --graph shows the DAG + HEAD; --path = HEAD ancestry only
+profact log [--graph] [--path] [--tests]  # versions on the CURRENT git branch; --graph shows the DAG + HEAD; --path = HEAD ancestry only; --tests prefixes each with its test outcome
 profact show <id>               # full prompt, response, diff, confidence (warns on 'uncertain')
 profact diff [<a> [<b>]] [--stat|--name-only] [--exit-code]  # compare two versions, a version vs working tree, or (no args) HEAD vs working tree; read-only, cross-branch OK
 profact blame <file> [<id>] [-L N:M] [--show]  # attribute each line to the prompt/version that last wrote it; --show expands prompt+response+hunk; blames any version, follows branch ancestry
 profact why <file>:<line> [<id>]  # sugar for `blame <file> -L line:line --show`: full intent behind one line
+profact bisect --good <id> [--bad <id>] -- <cmd>  # binary-search the lineage for the version that broke a test (exit 0=good, 125=skip, else bad); non-destructive
+profact test [--version <id>] -- <cmd>  # run a test command; record pass/fail/error on the version (HEAD by default); shown in show/status/log --tests
 profact checkout <id> [-f]      # §8 — auto-checkpoint, restore tree, move HEAD; preserves ignored files; prompts before a cross-branch target (--force skips)
 profact status                  # current HEAD id, branch, dirty-vs-HEAD, any open/in-progress version
 profact doctor [--fix]          # report/prune history artifacts: phantom checkpoints, orphaned objects (dangling turns report-only)

@@ -51,24 +51,10 @@ class BlameResult:
 
 
 def ancestry_chain(conn: sqlite3.Connection, version_id: str) -> list[store.Version]:
-    """Return the lineage of ``version_id`` oldest-first (root .. version).
-
-    Follows ``parent_id`` links; cycle-safe. This is the exact slice of the DAG
-    that could have contributed lines to the target snapshot, so blame need only
-    consider these versions.
-    """
-    chain: list[store.Version] = []
-    seen: set[str] = set()
-    current: str | None = version_id
-    while current and current not in seen:
-        seen.add(current)
-        version = store.get_version(conn, current)
-        if version is None:
-            break
-        chain.append(version)
-        current = version.parent_id
-    chain.reverse()
-    return chain
+    """The lineage of ``version_id`` oldest-first — the slice of the DAG that
+    could have contributed lines to the target snapshot. Thin alias for
+    :func:`store.ancestry`."""
+    return store.ancestry(conn, version_id)
 
 
 def _relative_path(repo_root: Path, file: str) -> str:

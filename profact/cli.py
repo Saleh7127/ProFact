@@ -7,7 +7,7 @@ from pathlib import Path
 
 import typer
 
-from . import git_ops, store
+from . import git_ops, store, testrunner
 
 app = typer.Typer(help="Prompt-native version control for AI-assisted development.")
 
@@ -141,6 +141,7 @@ def hook() -> None:
 def log(
     graph: bool = typer.Option(False, "--graph", help="Render the version DAG with branch tips."),
     path: bool = typer.Option(False, "--path", help="Show only HEAD's ancestry (how you got here)."),
+    tests: bool = typer.Option(False, "--tests", help="Prefix each version with its test outcome."),
 ) -> None:
     """List versions on the current Git branch (branch-scoped, newest first)."""
     repo_root = _resolve_repo_root()
@@ -153,6 +154,7 @@ def log(
             versions = _ancestry(conn, head)
         else:
             versions = store.list_branch_versions(conn, branch, head=head)
+        tests_map = store.all_test_results(conn) if tests else None
 
     if not versions:
         typer.echo(f"No versions yet on '{branch}'.")
@@ -161,10 +163,10 @@ def log(
     versions = sorted(versions, key=lambda v: v.timestamp, reverse=True)
 
     if graph:
-        _print_graph(repo_root, versions, head, branch)
+        _print_graph(repo_root, versions, head, branch, tests_map)
     else:
         for version in versions:
-            typer.echo(_row_text(repo_root, version, head))
+            typer.echo(_row_text(repo_root, version, head, tests_map))
 
 
 @app.command()
@@ -174,6 +176,7 @@ def show(version_id: str) -> None:
     _require_init(repo_root)
     with store.connect(repo_root) as conn:
         version = store.get_version(conn, version_id)
+        test_result = store.get_test_result(conn, version_id) if version else None
     if version is None:
         typer.echo(f"error: no such version '{version_id}'", err=True)
         raise typer.Exit(1)
@@ -190,6 +193,8 @@ def show(version_id: str) -> None:
         typer.echo(f"  model:    {version.model}{temp}")
     if version.commit_hash:
         typer.echo(f"  commit:   {version.commit_hash[:8]}")
+    if test_result:
+        typer.echo(f"  test:     {testrunner.format_result(test_result)}")
     if version.confidence and version.confidence != "high":
         typer.echo(
             f"  warning:  confidence is '{version.confidence}' — "
@@ -411,6 +416,139 @@ def _resolve_blame_version(repo_root: Path, branch: str, token: str | None) -> s
 
 
 @app.command()
+def bisect(
+    cmd: list[str] = typer.Argument(
+        ...,
+        help="Test command, after `--` (e.g. -- pytest -q). "
+        "Exit 0 = good, 125 = skip, anything else = bad.",
+    ),
+    good: str = typer.Option(
+        ..., "--good", "-g", help="A known-good version (must be an ancestor of bad)."
+    ),
+    bad: str = typer.Option(
+        None, "--bad", "-b", help="A known-bad version (defaults to the branch HEAD)."
+    ),
+) -> None:
+    """Binary-search the prompt lineage for the version that broke a test.
+
+    Runs the test command at candidate snapshots between <good> and <bad> and
+    reports the first failing version. Non-destructive: never creates versions or
+    moves HEAD, and restores the working tree when done.
+    """
+    from . import bisect as bisect_mod
+
+    repo_root = _resolve_repo_root()
+    _require_init(repo_root)
+    branch = git_ops.current_branch(repo_root)
+
+    bad_id = bad
+    if bad_id is None:
+        bad_id = store.read_head(repo_root, branch, seed=False)
+        if not bad_id:
+            typer.echo("error: no HEAD on this branch; pass --bad <version>", err=True)
+            raise typer.Exit(1)
+    if bad_id.upper() == "HEAD":
+        bad_id = store.read_head(repo_root, branch, seed=False)
+    good_id = good
+    if good_id.upper() == "HEAD":
+        good_id = store.read_head(repo_root, branch, seed=False)
+
+    def _on_step(step: bisect_mod.StepResult) -> None:
+        typer.echo(
+            f"  {step.outcome:<4} exit {step.exit_code:<3} "
+            f"{step.version.id:<5} [{step.version.type:<6}] "
+            f"{_summary(repo_root, step.version)}"
+        )
+
+    typer.echo(f"bisecting '{branch}': good={good_id} bad={bad_id}")
+    try:
+        with store.connect(repo_root) as conn:
+            result = bisect_mod.bisect(
+                repo_root,
+                conn,
+                good_id=good_id,
+                bad_id=bad_id,
+                cmd=list(cmd),
+                on_step=_on_step,
+            )
+    except bisect_mod.BisectError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(1)
+    except git_ops.GitError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(1)
+
+    typer.echo("")
+    if result.first_bad is None:
+        lo, hi = result.inconclusive_between  # type: ignore[misc]
+        typer.echo(
+            f"inconclusive: the culprit is between {lo.id} and {hi.id}, but the "
+            f"candidates in between were skipped."
+        )
+        raise typer.Exit(2)
+
+    culprit = result.first_bad
+    typer.echo(f"first bad version: {culprit.id} [{culprit.type}]")
+    typer.echo(f"  {_summary(repo_root, culprit)}")
+    typer.echo(f"  tested {len(result.steps)} snapshot(s)")
+    typer.echo("")
+    typer.echo(f"inspect it:  profact show {culprit.id}")
+    typer.echo(f"blame lines: profact blame <file> {culprit.id}")
+
+
+@app.command()
+def test(
+    cmd: list[str] = typer.Argument(
+        ..., help="Test command, after `--` (e.g. -- pytest -q)."
+    ),
+    version_id: str = typer.Option(
+        None, "--version", "-v", help="Attach the result to this version (default: HEAD)."
+    ),
+) -> None:
+    """Run a test command and record its pass/fail outcome on a version.
+
+    Makes history behavior-aware: the result shows in `show`, `status`, and
+    `log --tests`. Exits 0 if the tests pass, non-zero otherwise (CI-friendly).
+    """
+    repo_root = _resolve_repo_root()
+    _require_init(repo_root)
+    branch = git_ops.current_branch(repo_root)
+
+    target = version_id or store.read_head(repo_root, branch, seed=False)
+    if not target:
+        typer.echo(
+            "error: no HEAD on this branch to attach a result to; pass --version",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    with store.connect(repo_root) as conn:
+        version = store.get_version(conn, target)
+        if version is None:
+            typer.echo(f"error: no such version '{target}'", err=True)
+            raise typer.Exit(1)
+        # The command runs against the current working tree; warn if that isn't
+        # the snapshot we're attributing the result to.
+        version_tree = version.tree_after or version.tree_before
+        if git_ops.write_tree(repo_root) != version_tree:
+            typer.echo(
+                f"note: working tree differs from {version.id}; the result reflects "
+                f"your current files, not {version.id}'s snapshot",
+                err=True,
+            )
+        try:
+            outcome = testrunner.run_and_record(
+                repo_root, conn, version_id=target, cmd=list(cmd)
+            )
+        except testrunner.TestRunError as exc:
+            typer.echo(f"error: {exc}", err=True)
+            raise typer.Exit(2)
+
+    typer.echo(f"{target}: {testrunner.format_result(outcome.result)}")
+    raise typer.Exit(0 if outcome.result.status == testrunner.PASS else 1)
+
+
+@app.command()
 def checkout(
     version_id: str,
     force: bool = typer.Option(
@@ -495,6 +633,7 @@ def status() -> None:
     with store.connect(repo_root) as conn:
         head = store.get_version(conn, head_id)
         count = len(store.list_branch_versions(conn, branch, head=head_id))
+        test_result = store.get_test_result(conn, head_id)
 
     if head is None:
         typer.echo(f"HEAD:    {head_id} (missing from store)")
@@ -502,6 +641,8 @@ def status() -> None:
 
     typer.echo(f"HEAD:    {head.id} [{head.type}] {_summary(repo_root, head)}")
     typer.echo(f"versions on branch: {count}")
+    if test_result:
+        typer.echo(f"tests:   {testrunner.format_result(test_result)}")
 
     head_tree = head.tree_after or head.tree_before
     current_tree = git_ops.write_tree(repo_root)
@@ -702,17 +843,31 @@ def _summary(repo_root: Path, version: store.Version) -> str:
     return "(no prompt text)"
 
 
-def _row_text(repo_root: Path, version: store.Version, head: str | None) -> str:
+def _row_text(
+    repo_root: Path,
+    version: store.Version,
+    head: str | None,
+    tests: dict[str, store.TestResult] | None = None,
+) -> str:
     marker = "HEAD " if version.id == head else "     "
     branch = f"({version.git_branch})"
+    prefix = ""
+    if tests is not None:
+        result = tests.get(version.id)
+        # Fixed width (6) so rows stay aligned whether or not a version was tested.
+        prefix = (testrunner.marker(result.status) if result else "      ") + " "
     return (
-        f"{version.id:<5} {marker}[{version.type:<10}] "
+        f"{prefix}{version.id:<5} {marker}[{version.type:<10}] "
         f"{branch:<14} {_summary(repo_root, version)}"
     )
 
 
 def _print_graph(
-    repo_root: Path, versions: list[store.Version], head: str | None, branch: str
+    repo_root: Path,
+    versions: list[store.Version],
+    head: str | None,
+    branch: str,
+    tests: dict[str, store.TestResult] | None = None,
 ) -> None:
     """Render the version DAG as an ASCII graph.
 
@@ -747,7 +902,7 @@ def _print_graph(
             "*" if i == col else ("|" if lane is not None else " ")
             for i, lane in enumerate(lanes)
         )
-        typer.echo(f"{node:<{_GRAPH_GUTTER}} {_row_text(repo_root, version, head)}")
+        typer.echo(f"{node:<{_GRAPH_GUTTER}} {_row_text(repo_root, version, head, tests)}")
 
         parent = version.parent_id if version.parent_id in ids else None
         merge: tuple[int, int] | None = None

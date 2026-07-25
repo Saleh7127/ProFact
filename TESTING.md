@@ -30,7 +30,7 @@ and installs the dev dependency (`pytest`).
 pytest -q
 ```
 
-Expected: **59 passed**. Coverage by area:
+Expected: **76 passed**. Coverage by area:
 
 | File | What it proves |
 |------|----------------|
@@ -42,6 +42,8 @@ Expected: **59 passed**. Coverage by area:
 | `test_phase7.py` | `note` (Git Notes) and `start --claude` wiring |
 | `test_branch_heads.py` | per-branch HEADs, carry-over, cross-branch checkout prompt, `doctor` |
 | `test_blame.py` | line→version attribution, reverts/re-adds, branch ancestry, `blame`/`why` |
+| `test_bisect.py` | binary-search culprit, endpoint validation, skips, tree/HEAD restore |
+| `test_testrunner.py` | record pass/fail/error per version, display in show/status/log, doctor keeps output |
 
 ---
 
@@ -229,7 +231,106 @@ unreachable and never enter your real history.
 
 ---
 
-## 6. Real capture path A — Cursor (primary)
+## 6. Regression hunt — `profact bisect`
+
+When a test that used to pass now fails, `profact bisect` binary-searches the
+prompt lineage between a known-good and a known-bad version, running your test
+command at each candidate, and reports **the version (prompt) that introduced the
+regression**. It's the AI-native `git bisect run`.
+
+Exit-code convention for the test command (same as `git bisect run`):
+`0` = good, `125` = skip (can't judge this snapshot), anything else = bad.
+
+Continuing in `/tmp/pf-demo`, suppose the history is `v1 … v10` and something
+broke somewhere along the way:
+
+```bash
+# HEAD (v10) is broken; v3 was known good. Run pytest at each candidate:
+profact bisect --good v3 -- pytest -q
+
+# Or name both ends explicitly:
+profact bisect --good v3 --bad v10 -- pytest -q
+
+# Any shell test works — exit status is all that matters:
+profact bisect -g v3 -- bash -c "grep -q 'answer = 42' calc.py"
+```
+
+`--bad` defaults to the current branch HEAD. Output looks like:
+
+```
+bisecting 'main': good=v3 bad=v10
+  bad  exit 1   v10   [prompt] refactor the parser
+  good exit 0   v3    [prompt] add the parser
+  bad  exit 1   v7    [prompt] switch to streaming reads
+  good exit 0   v5    [prompt] add unit tests
+  bad  exit 1   v6    [prompt] cache the file handle
+
+first bad version: v6 [prompt]
+  cache the file handle
+  tested 5 snapshot(s)
+
+inspect it:  profact show v6
+blame lines: profact blame <file> v6
+```
+
+Then chain it with blame to see exactly which line the culprit prompt changed:
+`profact blame <file> v6`.
+
+Notes:
+- **Non-destructive.** Bisect never creates versions and never moves HEAD; it
+  drives the working tree through candidate snapshots and **restores your
+  original working tree** when it finishes (even on error/interrupt).
+- **Endpoints are validated.** If the "bad" version actually passes, or the
+  "good" version actually fails, bisect stops with a clear error instead of
+  returning a wrong culprit.
+- **Same lineage only.** `--good` must be an ancestor of `--bad` (the normal
+  "worked at X, broken at Y" case). Cross-branch bisection is out of scope.
+
+---
+
+## 7. Behavior-aware history — `profact test`
+
+profact knows *what* each prompt changed and *why*; `profact test` adds *did it
+work*. It runs a test command against your working tree and records the outcome
+(`pass` / `fail` / `error`) on the current version, so history becomes
+behavior-aware.
+
+```bash
+profact test -- pytest -q          # record the result on HEAD
+profact test -- bash -c "npm test" # any command works; exit 0 = pass, else fail
+profact test --version v6 -- pytest -q   # attribute the result to a specific version
+```
+
+`profact test` exits with the test's own status (0 on pass, non-zero otherwise),
+so it drops straight into scripts/CI. The captured stdout+stderr is stored as a
+content-addressed blob (and is protected from `doctor` pruning).
+
+See the outcomes anywhere versions appear:
+
+```bash
+profact show v6        # includes a `test:` line when a result exists
+profact status         # shows HEAD's test outcome
+profact log --tests    # prefixes each row with [pass] / [FAIL] / [err ]
+```
+
+Example `log --tests`:
+
+```
+[FAIL] v6    HEAD [prompt    ] (main)  cache the file handle
+[pass] v5         [prompt    ] (main)  add unit tests
+[pass] v4         [prompt    ] (main)  add the parser
+```
+
+This is the foundation for outcome-aware analysis (which prompts produced passing
+vs failing code) and pairs with `bisect`: once you find the culprit, record its
+red result and the surrounding greens to document the regression.
+
+> The result reflects your **current working tree** at the moment you run it. If
+> the tree differs from the version you're attributing to, profact prints a note.
+
+---
+
+## 8. Real capture path A — Cursor (primary)
 
 This is the intended day-to-day mode.
 
@@ -260,7 +361,7 @@ profact log                               # a new prompt version appears
 
 ---
 
-## 7. Real capture path B — Claude Code (secondary)
+## 9. Real capture path B — Claude Code (secondary)
 
 Requires the `claude` CLI installed and on PATH.
 
@@ -276,7 +377,7 @@ tears the proxy/watcher down when `claude` exits. Inspect with `profact log` /
 
 ---
 
-## 8. Optional — link a version to a Git commit
+## 10. Optional — link a version to a Git commit
 
 ```bash
 git commit -m "ship login"
@@ -286,7 +387,7 @@ git notes --ref=profact show HEAD
 
 ---
 
-## 9. Maintenance — `profact doctor`
+## 11. Maintenance — `profact doctor`
 
 `doctor` scans `.profact/history.db` for safe-to-remove artifacts and reports
 them. It changes nothing unless you pass `--fix`.
@@ -385,6 +486,6 @@ recorded real source changes.
 
 ### Out of scope for the MVP (by design)
 Copilot/ChatGPT adapters, shared/mergeable history, mid-session pull of a
-foreign branch, semantic prompt diffing, `replay`, and any GUI. (`profact diff`
-and `profact blame`/`why` are now implemented — see sections 3 and 5.) The
+foreign branch, semantic prompt diffing, `replay`, and any GUI. (`profact diff`,
+`blame`/`why`, and `bisect` are now implemented — see sections 3, 5, and 6.) The
 architecture leaves room for the rest but does not implement them.

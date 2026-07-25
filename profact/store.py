@@ -41,7 +41,21 @@ CREATE TABLE IF NOT EXISTS heads (
     git_branch  TEXT PRIMARY KEY,
     version_id  TEXT
 );
+
+-- Test outcome per version (behavior-aware history). One row per version; a
+-- re-run overwrites the previous result. output_ref points at a content-addressed
+-- blob holding the captured stdout+stderr.
+CREATE TABLE IF NOT EXISTS test_results (
+    version_id  TEXT PRIMARY KEY,
+    status      TEXT NOT NULL,       -- 'pass' | 'fail' | 'error'
+    exit_code   INTEGER,
+    command     TEXT,
+    output_ref  TEXT,
+    timestamp   TEXT NOT NULL
+);
 """
+
+TEST_STATUSES = ("pass", "fail", "error")
 
 # Columns added after the initial schema; applied to existing DBs on connect.
 _MIGRATION_COLUMNS = (("generation_id", "TEXT"), ("conversation_id", "TEXT"))
@@ -65,6 +79,16 @@ class Version:
     confidence: str
     generation_id: str | None = None
     conversation_id: str | None = None
+
+
+@dataclass
+class TestResult:
+    version_id: str
+    status: str  # one of TEST_STATUSES
+    exit_code: int | None
+    command: str | None
+    output_ref: str | None
+    timestamp: str
 
 
 def profact_dir(repo_root: Path) -> Path:
@@ -120,6 +144,12 @@ def _migrate(conn: sqlite3.Connection) -> None:
     # seed each branch on first use (see read_head), so this is non-destructive.
     conn.execute(
         "CREATE TABLE IF NOT EXISTS heads (git_branch TEXT PRIMARY KEY, version_id TEXT)"
+    )
+    # Behavior-aware history (test outcomes) was added after the initial schema.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS test_results ("
+        "version_id TEXT PRIMARY KEY, status TEXT NOT NULL, exit_code INTEGER, "
+        "command TEXT, output_ref TEXT, timestamp TEXT NOT NULL)"
     )
     if changed:
         conn.commit()
@@ -321,19 +351,116 @@ def list_branch_versions(
     return sorted(result.values(), key=lambda v: v.timestamp)
 
 
+def ancestry(conn: sqlite3.Connection, version_id: str) -> list[Version]:
+    """Return the lineage of ``version_id`` oldest-first (root .. version).
+
+    Follows ``parent_id`` links and is cycle-safe. This is the linear slice of
+    the DAG leading to a version — the exact search space for blame attribution
+    and for `bisect` (which needs a known-good ancestor of a known-bad version).
+    """
+    chain: list[Version] = []
+    seen: set[str] = set()
+    current: str | None = version_id
+    while current and current not in seen:
+        seen.add(current)
+        version = get_version(conn, current)
+        if version is None:
+            break
+        chain.append(version)
+        current = version.parent_id
+    chain.reverse()
+    return chain
+
+
 def all_versions(conn: sqlite3.Connection) -> list[Version]:
     rows = conn.execute("SELECT * FROM versions ORDER BY timestamp").fetchall()
     return [_row_to_version(row) for row in rows]
 
 
 def referenced_object_ids(conn: sqlite3.Connection) -> set[str]:
-    """Every object digest still referenced by a version (prompt/response/diff)."""
+    """Every object digest still referenced by a version (prompt/response/diff)
+    or a test result (captured output)."""
     refs: set[str] = set()
     for row in conn.execute(
         "SELECT prompt_ref, response_ref, diff_ref FROM versions"
     ):
         refs.update(value for value in row if value)
+    for row in conn.execute("SELECT output_ref FROM test_results"):
+        if row["output_ref"]:
+            refs.add(row["output_ref"])
     return refs
+
+
+def set_test_result(
+    conn: sqlite3.Connection,
+    version_id: str,
+    *,
+    status: str,
+    exit_code: int | None,
+    command: str | None,
+    output_ref: str | None,
+    timestamp: str | None = None,
+) -> TestResult:
+    """Record (upserting) the test outcome for ``version_id``."""
+    if status not in TEST_STATUSES:
+        raise ValueError(f"unknown test status: {status}")
+    result = TestResult(
+        version_id=version_id,
+        status=status,
+        exit_code=exit_code,
+        command=command,
+        output_ref=output_ref,
+        timestamp=timestamp or datetime.now(timezone.utc).isoformat(),
+    )
+    conn.execute(
+        """
+        INSERT INTO test_results
+            (version_id, status, exit_code, command, output_ref, timestamp)
+        VALUES (?,?,?,?,?,?)
+        ON CONFLICT(version_id) DO UPDATE SET
+            status = excluded.status,
+            exit_code = excluded.exit_code,
+            command = excluded.command,
+            output_ref = excluded.output_ref,
+            timestamp = excluded.timestamp
+        """,
+        (
+            result.version_id,
+            result.status,
+            result.exit_code,
+            result.command,
+            result.output_ref,
+            result.timestamp,
+        ),
+    )
+    conn.commit()
+    return result
+
+
+def get_test_result(conn: sqlite3.Connection, version_id: str) -> TestResult | None:
+    row = conn.execute(
+        "SELECT * FROM test_results WHERE version_id = ?", (version_id,)
+    ).fetchone()
+    return _row_to_test_result(row) if row else None
+
+
+def all_test_results(conn: sqlite3.Connection) -> dict[str, TestResult]:
+    """Map of version_id -> latest TestResult (for markers and summaries)."""
+    return {
+        row["version_id"]: _row_to_test_result(row)
+        for row in conn.execute("SELECT * FROM test_results")
+    }
+
+
+def _row_to_test_result(row: sqlite3.Row) -> TestResult:
+    return TestResult(
+        version_id=row["version_id"],
+        status=row["status"],
+        exit_code=row["exit_code"],
+        command=row["command"],
+        output_ref=row["output_ref"],
+        timestamp=row["timestamp"],
+    )
 
 
 def heads_pointing_to(conn: sqlite3.Connection, version_id: str) -> list[str]:

@@ -4,7 +4,8 @@
 > collects directions to grow the current MVP into a full product and a strong
 > thesis. The MVP already delivers: capture (Cursor hooks + Claude proxy),
 > content-addressed storage, a prompt DAG with per-branch carry-over HEADs, safe
-> `checkout`, `log/show/status/diff`, `blame`/`why`, `note`, and `doctor`.
+> `checkout`, `log/show/status/diff`, `blame`/`why`, `bisect`, `test` (outcome
+> recording), `note`, and `doctor`.
 >
 > Ideas were drafted here and cross-checked against a GPT-5.5 brainstorm
 > ([feature brainstorm](ee5efa3b-3992-419d-b8c7-78b216e6fe66)).
@@ -68,8 +69,12 @@ Effort/Impact are rough (Low / Med / High). ★ = strong thesis contribution.
   <file>:<line>` expands the full prompt + response excerpt + hunk (Tier 2).
   Blames any historical version and follows branch ancestry; reuses Git's blame
   engine over a throwaway synthetic-commit replay of the lineage. ★ *Impact: Very High · Effort: High.*
-- **`profact bisect -- <test cmd>`** — binary-search the prompt DAG to find the
-  version that broke a test. *Impact: Very High · Effort: Med.*
+- **`profact bisect -- <test cmd>`** — ✅ **implemented.** Binary-searches the
+  prompt lineage between a known-good and known-bad version, running a test
+  command at each candidate (exit 0 = good, 125 = skip, else bad) to pinpoint the
+  version that introduced a regression. Non-destructive (never creates versions
+  or moves HEAD; restores the working tree); validates endpoints; handles skips.
+  *Impact: Very High · Effort: Med.*
 - **Line-origin search** — given a line/regex, find the version that added,
   changed, or removed it. *Impact: High · Effort: Med.*
 - **Semantic prompt search** — search by meaning ("auth bug", "made UI
@@ -110,8 +115,11 @@ Effort/Impact are rough (Low / Med / High). ★ = strong thesis contribution.
 - **More capture adapters** — Aider, Continue, Windsurf, Copilot, Cursor CLI, a
   generic OpenAI-compatible proxy, Anthropic SDK proxy. Delivers the
   IDE/CLI-agnostic promise. *Impact: Very High · Effort: High.*
-- **Test-runner hooks** — record test pass/fail per version, making history
-  behavior-aware, not just diff-aware. ★ *Impact: High · Effort: Med.*
+- **Test-runner hooks** — ✅ **implemented.** `profact test -- <cmd>` runs a test
+  command and records pass/fail/error on a version (content-addressed output),
+  making history behavior-aware, not just diff-aware. Surfaced in `show`,
+  `status`, and `log --tests`. Foundation for effectiveness scoring and
+  bug-causing-prompt analysis. ★ *Impact: High · Effort: Med.*
 - **Richer model metadata** — provider, model version, temperature, tools,
   context size, token counts (where available). *Impact: High · Effort: Med.*
 - **Smarter Git-commit linking** — suggest attaching a whole prompt chain to a
@@ -194,8 +202,8 @@ Effort/Impact are rough (Low / Med / High). ★ = strong thesis contribution.
 ## 4. Suggested phased roadmap
 
 **Phase A — Make history useful (CLI power tools)**
-`profact diff`, `tag`, rich `log` filters, `blame`, `bisect`. Highest
-value-per-effort; each is a standalone, demoable win.
+`profact diff` ✅, `blame`/`why` ✅, `bisect` ✅ done. Remaining: `tag` and rich
+`log` filters. Highest value-per-effort; each is a standalone, demoable win.
 
 **Phase B — Make history visible**
 Interactive TUI first (no server), then a local web dashboard, then an
@@ -220,14 +228,14 @@ Multi-session, crash recovery, branch-switch hooks, large-repo performance,
 | # | Idea | Why it's top-tier | Effort | Impact | Thesis |
 |--:|------|-------------------|:------:|:------:|:------:|
 | 1 | Prompt **blame** | Clearest "Git for AI intent"; maps lines → prompts | High | Very High | ★★★ |
-| 2 | **Regression hunt / bisect** | Turns history into a debugging tool | Med | Very High | ★★ |
+| 2 | **Regression hunt / bisect** ✅ | Turns history into a debugging tool | Med | Very High | ★★ |
 | 3 | Editor **panel** (VS Code/Cursor) | Puts history where devs already work | High | Very High | ★ |
 | 4 | **Multi-session** support | Removes a core MVP limitation | High | Very High | ★ |
 | 5 | **Prompt-lineage code review** | Makes AI code auditable in teams | High | Very High | ★★★ |
 | 6 | **`profact diff` + TUI** | Cheapest path to real, daily-use UX | Med | High | ★ |
 | 7 | **Replay prompt on new base** | A novel VC operation for AI coding | High | High | ★★★ |
 | 8 | **Secret scanner + redaction** | Trust prerequisite for sharing | Med | Very High | ★ |
-| 9 | **Test-runner hooks** | Ties versions to behavioral outcomes | Med | High | ★★★ |
+| 9 | **Test-runner hooks** ✅ | Ties versions to behavioral outcomes | Med | High | ★★★ |
 | 10 | **Prompt-artifact dataset builder** | Makes profact research infrastructure | High | Very High | ★★★ |
 
 ---
