@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import json
+import os
+import re
 import stat
 import sys
 from pathlib import Path
 
 import typer
 
-from . import git_ops, store, testrunner
+from . import git_ops, log_view, store, testrunner
 
 app = typer.Typer(help="Prompt-native version control for AI-assisted development.")
 
@@ -107,9 +109,11 @@ def note(
         typer.echo("error: no version to link (HEAD is empty)", err=True)
         raise typer.Exit(1)
     with store.connect(repo_root) as conn:
-        if store.get_version(conn, target) is None:
-            typer.echo(f"error: no such version '{target}'", err=True)
+        resolved_target = _resolve_version_token(repo_root, conn, branch, target)
+        if resolved_target is None:
+            typer.echo(f"error: no such version or tag '{target}'", err=True)
             raise typer.Exit(1)
+        target = resolved_target
     try:
         git_ops.add_note(repo_root, commit, json.dumps({"version_id": target}))
     except git_ops.GitError as exc:
@@ -130,6 +134,18 @@ def hook() -> None:
         roots = event.get("workspace_roots") or []
         start_dir = Path(roots[0]) if roots else Path.cwd()
         repo_root = git_ops.repo_root(start_dir)
+        # Probe: set PROFACT_HOOK_DEBUG=1 to record every raw hook payload to
+        # .profact/hook-events.log. Use it to confirm exactly what your Cursor
+        # version delivers (e.g. the afterAgentThought shape) without affecting
+        # capture. Best-effort and never fatal.
+        if os.environ.get("PROFACT_HOOK_DEBUG"):
+            try:
+                log_path = store.profact_dir(repo_root) / "hook-events.log"
+                log_path.parent.mkdir(parents=True, exist_ok=True)
+                with log_path.open("a", encoding="utf-8") as fh:
+                    fh.write(json.dumps(event) + "\n")
+            except Exception:
+                pass
         response = cursor_hooks.handle(repo_root, event)
     except Exception:
         response = {}
@@ -141,32 +157,132 @@ def hook() -> None:
 def log(
     graph: bool = typer.Option(False, "--graph", help="Render the version DAG with branch tips."),
     path: bool = typer.Option(False, "--path", help="Show only HEAD's ancestry (how you got here)."),
-    tests: bool = typer.Option(False, "--tests", help="Prefix each version with its test outcome."),
+    tests: bool = typer.Option(
+        False,
+        "--tests",
+        help="Show explicit test status/details and an outcome summary.",
+    ),
+    tag_filter: str = typer.Option(None, "--tag", help="Show versions carrying this tag."),
+    type_filter: str = typer.Option(
+        None, "--type", help="Filter by version type: prompt, anchor, checkpoint, or human."
+    ),
+    branch_filter: str = typer.Option(
+        None, "--branch", help="Inspect another Git branch's profact history."
+    ),
+    model_filter: str = typer.Option(
+        None, "--model", help="Filter by case-insensitive model-name substring."
+    ),
+    file_filter: str = typer.Option(
+        None,
+        "--file",
+        "--changed-path",
+        help="Filter versions whose diff touched this repository-relative path.",
+    ),
+    since: str = typer.Option(
+        None, "--since", help="Filter by age (for example 7d, 12h, 2w) or ISO date."
+    ),
+    test_status: str = typer.Option(
+        None,
+        "--test-status",
+        help="Filter by pass, fail, error, or untested; also enables --tests display.",
+    ),
 ) -> None:
-    """List versions on the current Git branch (branch-scoped, newest first)."""
+    """List and filter branch-scoped versions, newest first."""
     repo_root = _resolve_repo_root()
     _require_init(repo_root)
-    branch = git_ops.current_branch(repo_root)
+    current_branch = git_ops.current_branch(repo_root)
+    branch = branch_filter or current_branch
     head = store.read_head(repo_root, branch, seed=False)
+
+    type_filter = type_filter.lower() if type_filter else None
+    if type_filter and type_filter not in store.VERSION_TYPES:
+        typer.echo(
+            f"error: unknown version type '{type_filter}'; "
+            f"choose from {', '.join(store.VERSION_TYPES)}",
+            err=True,
+        )
+        raise typer.Exit(2)
+    normalized_test_status = log_view.normalize_test_filter(test_status)
+    if test_status and normalized_test_status is None:
+        typer.echo(
+            f"error: unknown test status '{test_status}'; "
+            "choose pass, fail, error, or untested",
+            err=True,
+        )
+        raise typer.Exit(2)
+    try:
+        since_cutoff = log_view.parse_since(since) if since else None
+        normalized_file = (
+            log_view.normalize_path(repo_root, file_filter) if file_filter else None
+        )
+    except ValueError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(2)
+    show_tests = tests or normalized_test_status is not None
 
     with store.connect(repo_root) as conn:
         if path:
-            versions = _ancestry(conn, head)
+            base_versions = log_view.ancestry(conn, head)
+            visible = store.list_branch_versions(conn, branch, head=head)
+            omitted = max(0, len(visible) - len(base_versions))
         else:
-            versions = store.list_branch_versions(conn, branch, head=head)
-        tests_map = store.all_test_results(conn) if tests else None
+            base_versions = store.list_branch_versions(conn, branch, head=head)
+            omitted = 0
+        tests_map = store.all_test_results(conn) if show_tests else None
+        tags_map = store.tags_by_version(conn)
+        if tag_filter and store.get_tag(conn, tag_filter) is None:
+            typer.echo(f"error: no such tag '{tag_filter}'", err=True)
+            raise typer.Exit(1)
 
-    if not versions:
+    if not base_versions:
         typer.echo(f"No versions yet on '{branch}'.")
         return
 
-    versions = sorted(versions, key=lambda v: v.timestamp, reverse=True)
+    base_versions = sorted(
+        base_versions, key=lambda version: version.timestamp, reverse=True
+    )
+    versions = log_view.filter_versions(
+        repo_root,
+        base_versions,
+        tags=tags_map,
+        tests=tests_map or {},
+        tag=tag_filter,
+        version_type=type_filter,
+        model=model_filter,
+        changed_path=normalized_file,
+        since_cutoff=since_cutoff,
+        test_status=normalized_test_status,
+    )
+    filtered_out = len(base_versions) - len(versions)
+    filter_description = log_view.filter_description(
+        branch_filter=branch_filter,
+        tag=tag_filter,
+        version_type=type_filter,
+        model=model_filter,
+        changed_path=normalized_file,
+        since=since,
+        test_status=normalized_test_status,
+    )
+    if not versions:
+        if filter_description:
+            typer.echo(f"filters: {' · '.join(filter_description)}\n")
+        typer.echo(f"No versions match the requested filters on '{branch}'.")
+        return
 
-    if graph:
-        _print_graph(repo_root, versions, head, branch, tests_map)
-    else:
-        for version in versions:
-            typer.echo(_row_text(repo_root, version, head, tests_map))
+    log_view.render(
+        repo_root,
+        versions,
+        shape_versions=base_versions,
+        head=head,
+        branch=branch,
+        tests=tests_map if show_tests else None,
+        tags=tags_map,
+        graph=graph,
+        path_mode=path,
+        omitted=omitted,
+        filtered_out=filtered_out,
+        filters=filter_description,
+    )
 
 
 @app.command()
@@ -174,14 +290,16 @@ def show(version_id: str) -> None:
     """Show the prompt, response, and diff for a single version."""
     repo_root = _resolve_repo_root()
     _require_init(repo_root)
+    branch = git_ops.current_branch(repo_root)
     with store.connect(repo_root) as conn:
-        version = store.get_version(conn, version_id)
-        test_result = store.get_test_result(conn, version_id) if version else None
+        resolved_id = _resolve_version_token(repo_root, conn, branch, version_id)
+        version = store.get_version(conn, resolved_id) if resolved_id else None
+        test_result = store.get_test_result(conn, resolved_id) if resolved_id else None
+        tags = store.tags_by_version(conn).get(resolved_id, []) if resolved_id else []
     if version is None:
-        typer.echo(f"error: no such version '{version_id}'", err=True)
+        typer.echo(f"error: no such version or tag '{version_id}'", err=True)
         raise typer.Exit(1)
 
-    branch = git_ops.current_branch(repo_root)
     head = store.read_head(repo_root, branch, seed=False)
     is_head = " (HEAD)" if version.id == head else ""
     typer.echo(f"version {version.id}{is_head}  [{version.type}]")
@@ -193,6 +311,8 @@ def show(version_id: str) -> None:
         typer.echo(f"  model:    {version.model}{temp}")
     if version.commit_hash:
         typer.echo(f"  commit:   {version.commit_hash[:8]}")
+    if tags:
+        typer.echo(f"  tags:     {', '.join(tags)}")
     if test_result:
         typer.echo(f"  test:     {testrunner.format_result(test_result)}")
     if version.confidence and version.confidence != "high":
@@ -206,6 +326,8 @@ def show(version_id: str) -> None:
         typer.echo("\nprompt:")
         typer.echo(_indent(prompt))
 
+    _echo_thinking(repo_root, version)
+
     response = store.read_object(repo_root, version.response_ref) if version.response_ref else None
     if response:
         typer.echo("\nresponse:")
@@ -217,6 +339,75 @@ def show(version_id: str) -> None:
         typer.echo(diff)
     else:
         typer.echo("  (no file changes)")
+
+
+@app.command()
+def tag(
+    version_id: str = typer.Argument(
+        None, help="Version id, tag, or HEAD to label. Omit both arguments to list tags."
+    ),
+    label: str = typer.Argument(None, help="New tag name."),
+    delete: str = typer.Option(None, "--delete", "-d", help="Delete a tag by name."),
+    force: bool = typer.Option(
+        False, "--force", "-f", help="Move an existing tag to the requested version."
+    ),
+) -> None:
+    """Create, list, delete, or deliberately move repository-wide version tags."""
+    repo_root = _resolve_repo_root()
+    _require_init(repo_root)
+    branch = git_ops.current_branch(repo_root)
+
+    if delete is not None:
+        if version_id is not None or label is not None or force:
+            typer.echo(
+                "error: --delete cannot be combined with version, label, or --force",
+                err=True,
+            )
+            raise typer.Exit(2)
+        with store.connect(repo_root) as conn:
+            removed = store.delete_tag(conn, delete)
+        if not removed:
+            typer.echo(f"error: no such tag '{delete}'", err=True)
+            raise typer.Exit(1)
+        typer.echo(f"deleted tag '{delete}'")
+        return
+
+    if version_id is None and label is None:
+        if force:
+            typer.echo("error: --force is only valid when creating/moving a tag", err=True)
+            raise typer.Exit(2)
+        with store.connect(repo_root) as conn:
+            tags = store.list_tags(conn)
+        if not tags:
+            typer.echo("No tags yet.")
+            return
+        for item in tags:
+            typer.echo(f"{item.name:<24} {item.version_id}")
+        return
+
+    if version_id is None or label is None:
+        typer.echo(
+            "error: creating a tag requires both <version> and <label>",
+            err=True,
+        )
+        raise typer.Exit(2)
+
+    error = _tag_name_error(label)
+    if error:
+        typer.echo(f"error: invalid tag '{label}': {error}", err=True)
+        raise typer.Exit(2)
+
+    with store.connect(repo_root) as conn:
+        resolved_id = _resolve_version_token(repo_root, conn, branch, version_id)
+        if resolved_id is None:
+            typer.echo(f"error: no such version or tag '{version_id}'", err=True)
+            raise typer.Exit(1)
+        try:
+            item = store.set_tag(conn, label, resolved_id, force=force)
+        except ValueError as exc:
+            typer.echo(f"error: {exc}", err=True)
+            raise typer.Exit(1)
+    typer.echo(f"tagged {item.version_id} as '{item.name}'")
 
 
 @app.command()
@@ -277,15 +468,13 @@ def _head_tree(repo_root: Path, conn, branch: str) -> tuple[str, str]:
 
 
 def _resolve_diff_tree(repo_root: Path, conn, branch: str, token: str) -> tuple[str, str]:
-    version_id = token
-    if token.upper() == "HEAD":
-        version_id = store.read_head(repo_root, branch, seed=False)
-        if not version_id:
-            typer.echo("error: no HEAD on this branch", err=True)
-            raise typer.Exit(1)
-    version = store.get_version(conn, version_id)
+    version_id = _resolve_version_token(repo_root, conn, branch, token)
+    if token.upper() == "HEAD" and not version_id:
+        typer.echo("error: no HEAD on this branch", err=True)
+        raise typer.Exit(1)
+    version = store.get_version(conn, version_id) if version_id else None
     if version is None:
-        typer.echo(f"error: no such version '{token}'", err=True)
+        typer.echo(f"error: no such version or tag '{token}'", err=True)
         raise typer.Exit(1)
     if version.tree_after is None:
         # Only an open (in-progress) prompt legitimately lacks a finalized tree;
@@ -405,14 +594,15 @@ def why(
 
 
 def _resolve_blame_version(repo_root: Path, branch: str, token: str | None) -> str:
-    """Resolve a blame target token to a version id (HEAD-aware)."""
+    """Resolve a blame target token to a version id (HEAD- and tag-aware)."""
     if token is None or token.upper() == "HEAD":
         head = store.read_head(repo_root, branch, seed=False)
         if not head:
             typer.echo("error: no HEAD on this branch to blame", err=True)
             raise typer.Exit(1)
         return head
-    return token
+    with store.connect(repo_root) as conn:
+        return store.resolve_version_id(conn, token) or token
 
 
 @app.command()
@@ -453,11 +643,17 @@ def bisect(
     if good_id.upper() == "HEAD":
         good_id = store.read_head(repo_root, branch, seed=False)
 
+    with store.connect(repo_root) as conn:
+        if good_id:
+            good_id = store.resolve_version_id(conn, good_id) or good_id
+        if bad_id:
+            bad_id = store.resolve_version_id(conn, bad_id) or bad_id
+
     def _on_step(step: bisect_mod.StepResult) -> None:
         typer.echo(
             f"  {step.outcome:<4} exit {step.exit_code:<3} "
             f"{step.version.id:<5} [{step.version.type:<6}] "
-            f"{_summary(repo_root, step.version)}"
+            f"{log_view.summary(repo_root, step.version)}"
         )
 
     typer.echo(f"bisecting '{branch}': good={good_id} bad={bad_id}")
@@ -489,7 +685,7 @@ def bisect(
 
     culprit = result.first_bad
     typer.echo(f"first bad version: {culprit.id} [{culprit.type}]")
-    typer.echo(f"  {_summary(repo_root, culprit)}")
+    typer.echo(f"  {log_view.summary(repo_root, culprit)}")
     typer.echo(f"  tested {len(result.steps)} snapshot(s)")
     typer.echo("")
     typer.echo(f"inspect it:  profact show {culprit.id}")
@@ -523,9 +719,10 @@ def test(
         raise typer.Exit(1)
 
     with store.connect(repo_root) as conn:
-        version = store.get_version(conn, target)
+        resolved_target = _resolve_version_token(repo_root, conn, branch, target)
+        version = store.get_version(conn, resolved_target) if resolved_target else None
         if version is None:
-            typer.echo(f"error: no such version '{target}'", err=True)
+            typer.echo(f"error: no such version or tag '{target}'", err=True)
             raise typer.Exit(1)
         # The command runs against the current working tree; warn if that isn't
         # the snapshot we're attributing the result to.
@@ -538,13 +735,13 @@ def test(
             )
         try:
             outcome = testrunner.run_and_record(
-                repo_root, conn, version_id=target, cmd=list(cmd)
+                repo_root, conn, version_id=version.id, cmd=list(cmd)
             )
         except testrunner.TestRunError as exc:
             typer.echo(f"error: {exc}", err=True)
             raise typer.Exit(2)
 
-    typer.echo(f"{target}: {testrunner.format_result(outcome.result)}")
+    typer.echo(f"{version.id}: {testrunner.format_result(outcome.result)}")
     raise typer.Exit(0 if outcome.result.status == testrunner.PASS else 1)
 
 
@@ -561,9 +758,10 @@ def checkout(
     branch = git_ops.current_branch(repo_root)
 
     with store.connect(repo_root) as conn:
-        target = store.get_version(conn, version_id)
+        resolved_id = _resolve_version_token(repo_root, conn, branch, version_id)
+        target = store.get_version(conn, resolved_id) if resolved_id else None
         if target is None:
-            typer.echo(f"error: no such version '{version_id}'", err=True)
+            typer.echo(f"error: no such version or tag '{version_id}'", err=True)
             raise typer.Exit(1)
         if target.tree_after is None:
             typer.echo(
@@ -639,7 +837,9 @@ def status() -> None:
         typer.echo(f"HEAD:    {head_id} (missing from store)")
         return
 
-    typer.echo(f"HEAD:    {head.id} [{head.type}] {_summary(repo_root, head)}")
+    typer.echo(
+        f"HEAD:    {head.id} [{head.type}] {log_view.summary(repo_root, head)}"
+    )
     typer.echo(f"versions on branch: {count}")
     if test_result:
         typer.echo(f"tests:   {testrunner.format_result(test_result)}")
@@ -659,7 +859,7 @@ def doctor(
     ),
 ) -> None:
     """Report (and with --fix, prune) history artifacts: phantom checkpoints,
-    dangling open turns, and orphaned objects."""
+    dangling open turns/tags, and orphaned objects."""
     repo_root = _resolve_repo_root()
     _require_init(repo_root)
 
@@ -669,6 +869,7 @@ def doctor(
         dangling = [
             v for v in versions if v.type == "prompt" and v.tree_after is None
         ]
+        dangling_tag_rows = store.dangling_tags(conn)
         referenced = store.referenced_object_ids(conn)
     orphans = _orphan_objects(repo_root, referenced)
 
@@ -677,11 +878,14 @@ def doctor(
         typer.echo(f"  {v.id}  (parent {v.parent_id or '-'})")
     typer.echo(f"dangling open turns:   {len(dangling)}")
     for v in dangling:
-        typer.echo(f"  {v.id}  {_summary(repo_root, v)}")
+        typer.echo(f"  {v.id}  {log_view.summary(repo_root, v)}")
     typer.echo(f"orphaned objects:      {len(orphans)}")
+    typer.echo(f"dangling tags:         {len(dangling_tag_rows)}")
+    for item in dangling_tag_rows:
+        typer.echo(f"  {item.name} -> {item.version_id}")
 
     if not fix:
-        if phantom or orphans:
+        if phantom or orphans or dangling_tag_rows:
             typer.echo("\nrun `profact doctor --fix` to prune the safe-to-remove items above")
         else:
             typer.echo("\nnothing to repair.")
@@ -691,13 +895,18 @@ def doctor(
     with store.connect(repo_root) as conn:
         for v in phantom:
             # Rewire any children onto the phantom's parent so no chain breaks,
-            # then move any branch HEAD off it, then delete the row.
+            # move any branch HEAD and tags off it, then delete the row.
             store.reparent_children(conn, v.id, v.parent_id)
             for br in store.heads_pointing_to(conn, v.id):
                 if v.parent_id:
                     store.write_head(repo_root, br, v.parent_id)
+            store.retarget_tags(conn, v.id, v.parent_id)
             store.delete_version(conn, v.id)
             removed_versions += 1
+        removed_tags = 0
+        for item in store.dangling_tags(conn):
+            if store.delete_tag(conn, item.name):
+                removed_tags += 1
         referenced = store.referenced_object_ids(conn)
 
     # If the repo-wide pointer still names a deleted version, repoint it.
@@ -714,7 +923,7 @@ def doctor(
 
     typer.echo(
         f"\nremoved {removed_versions} phantom checkpoint(s) and "
-        f"{removed_objects} orphaned object(s)."
+        f"{removed_objects} orphaned object(s), and {removed_tags} dangling tag(s)."
     )
     if dangling:
         typer.echo(
@@ -729,16 +938,8 @@ def _is_phantom_checkpoint(repo_root: Path, version: store.Version) -> bool:
     if version.type != "checkpoint":
         return False
     diff = store.read_object(repo_root, version.diff_ref) if version.diff_ref else ""
-    paths = _diff_paths(diff or "")
+    paths = log_view.diff_paths(diff or "")
     return all(git_ops.is_infra_path(p) for p in paths)
-
-
-def _diff_paths(diff_text: str) -> set[str]:
-    paths: set[str] = set()
-    for line in diff_text.splitlines():
-        if line.startswith("diff --git ") and " b/" in line:
-            paths.add(line.split(" b/", 1)[1].strip())
-    return paths
 
 
 def _orphan_objects(repo_root: Path, referenced: set[str]) -> list[Path]:
@@ -814,137 +1015,52 @@ def _require_init(repo_root: Path) -> None:
         raise typer.Exit(1)
 
 
-def _ancestry(conn, head_id: str | None) -> list[store.Version]:
-    chain: list[store.Version] = []
-    seen: set[str] = set()
-    current = head_id
-    while current and current not in seen:
-        seen.add(current)
-        version = store.get_version(conn, current)
-        if version is None:
-            break
-        chain.append(version)
-        current = version.parent_id
-    return chain
+def _resolve_version_token(
+    repo_root: Path, conn, branch: str, token: str
+) -> str | None:
+    """Resolve branch-local HEAD, a raw version id, or a repository-wide tag."""
+    if token.upper() == "HEAD":
+        return store.read_head(repo_root, branch, seed=False)
+    return store.resolve_version_id(conn, token)
 
 
-def _summary(repo_root: Path, version: store.Version) -> str:
-    if version.type == "anchor":
-        where = f" @ {version.commit_hash[:8]}" if version.commit_hash else ""
-        return f"start of history{where}"
-    if version.type == "checkpoint":
-        return "auto-saved work before a checkout"
-    if version.type == "human":
-        return "manual edit (no prompt)"
-    if version.prompt_ref:
-        text = store.read_object(repo_root, version.prompt_ref) or ""
-        first = text.strip().splitlines()[0] if text.strip() else ""
-        return _short(first) or "(empty prompt)"
-    return "(no prompt text)"
-
-
-def _row_text(
-    repo_root: Path,
-    version: store.Version,
-    head: str | None,
-    tests: dict[str, store.TestResult] | None = None,
-) -> str:
-    marker = "HEAD " if version.id == head else "     "
-    branch = f"({version.git_branch})"
-    prefix = ""
-    if tests is not None:
-        result = tests.get(version.id)
-        # Fixed width (6) so rows stay aligned whether or not a version was tested.
-        prefix = (testrunner.marker(result.status) if result else "      ") + " "
-    return (
-        f"{prefix}{version.id:<5} {marker}[{version.type:<10}] "
-        f"{branch:<14} {_summary(repo_root, version)}"
-    )
-
-
-def _print_graph(
-    repo_root: Path,
-    versions: list[store.Version],
-    head: str | None,
-    branch: str,
-    tests: dict[str, store.TestResult] | None = None,
-) -> None:
-    """Render the version DAG as an ASCII graph.
-
-    ``versions`` is newest-first. Because the history is a tree (each version has
-    one parent, but may have several children), a parent always sorts after all
-    its children, so when we reach a version its lane may already be claimed by a
-    sibling that shares the same parent — that is how forks and their merges get
-    drawn with ``*`` (a node), ``|`` (a lane passing through) and ``/`` (a lane
-    converging left onto a shared parent).
-    """
-    ids = {v.id for v in versions}
-    child_count: dict[str, int] = {}
-    for version in versions:
-        if version.parent_id in ids:
-            child_count[version.parent_id] = child_count.get(version.parent_id, 0) + 1
-
-    head_label = f"  (HEAD = {head})" if head else ""
-    typer.echo(f"DAG for branch '{branch}'{head_label}\n")
-
-    lanes: list[str | None] = []  # each lane holds the version id it next expects
-    for version in versions:
-        if version.id in lanes:
-            col = lanes.index(version.id)
-        elif None in lanes:
-            col = lanes.index(None)
-            lanes[col] = version.id
-        else:
-            lanes.append(version.id)
-            col = len(lanes) - 1
-
-        node = "".join(
-            "*" if i == col else ("|" if lane is not None else " ")
-            for i, lane in enumerate(lanes)
-        )
-        typer.echo(f"{node:<{_GRAPH_GUTTER}} {_row_text(repo_root, version, head, tests)}")
-
-        parent = version.parent_id if version.parent_id in ids else None
-        merge: tuple[int, int] | None = None
-        if parent is None:
-            lanes[col] = None
-        elif parent in lanes and lanes.index(parent) != col:
-            other = lanes.index(parent)
-            keep, drop = min(col, other), max(col, other)
-            lanes[keep] = parent
-            lanes[drop] = None
-            merge = (keep, drop)
-        else:
-            lanes[col] = parent
-
-        if merge is not None:
-            keep, drop = merge
-            connector = "".join(
-                "/" if i == drop else ("|" if lanes[i] is not None or i == keep else " ")
-                for i in range(len(lanes))
-            )
-            typer.echo(connector)
-
-        while lanes and lanes[-1] is None:
-            lanes.pop()
-
-    tips = [
-        v.id + (" (HEAD)" if v.id == head else "")
-        for v in versions
-        if child_count.get(v.id, 0) == 0
-    ]
-    branch_points = [v.id for v in versions if child_count.get(v.id, 0) > 1]
-    typer.echo("")
-    typer.echo(f"tips: {', '.join(tips) if tips else '-'}")
-    typer.echo(f"branch points: {', '.join(branch_points) if branch_points else '-'}")
-
-
-# Width reserved for the ASCII graph gutter so version rows line up.
-_GRAPH_GUTTER = 8
+def _tag_name_error(name: str) -> str | None:
+    if not name:
+        return "name cannot be empty"
+    if name.upper() == "HEAD" or re.fullmatch(r"v\d+", name, flags=re.IGNORECASE):
+        return "HEAD and version-like names (for example v7) are reserved"
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", name):
+        return "use letters, numbers, '.', '_' or '-' (starting with a letter or number)"
+    return None
 
 
 def _indent(text: str, prefix: str = "  ") -> str:
     return "\n".join(prefix + line for line in text.splitlines())
+
+
+_NO_THINKING_PLACEHOLDER = (
+    "(no reasoning captured — the model has no thinking capability, "
+    "or none was emitted for this turn)"
+)
+
+
+def _echo_thinking(repo_root: Path, version: store.Version) -> None:
+    """Print the model's reasoning for a version, or an explicit placeholder.
+
+    Only prompt turns carry reasoning; anchors/checkpoints/human edits have no
+    ``thinking_source`` and are skipped silently.
+    """
+    thinking = (
+        store.read_object(repo_root, version.thinking_ref)
+        if version.thinking_ref
+        else None
+    )
+    if thinking:
+        typer.echo("\nthinking:")
+        typer.echo(_indent(thinking))
+    elif version.thinking_source == store.THINKING_NONE:
+        typer.echo("\nthinking:")
+        typer.echo(_indent(_NO_THINKING_PLACEHOLDER))
 
 
 def _short(text: str, length: int = 72) -> str:

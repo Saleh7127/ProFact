@@ -13,7 +13,7 @@ When developing with Claude Code, a developer iterates through many prompts to b
 Every time you send a prompt to Claude Code, `profact` records the **prompt text, the model configuration, and the exact file changes that resulted**, storing them together as a single **version**. You can move backward and forward through this prompt-driven history like Git commits — except the unit of history is intent + its result.
 
 **MVP scope:** single user, local machine, one active session at a time. The project being versioned is itself a Git repository. Two capture adapters are in scope:
-- **Cursor (primary)** — captured via **Cursor Hooks** (`beforeSubmitPrompt`, `afterAgentResponse`, `afterFileEdit`, `sessionStart`/`sessionEnd`). This matches how the tool is actually used and gives explicit turn boundaries + exact edit attribution.
+- **Cursor (primary)** — captured via **Cursor Hooks** (`beforeSubmitPrompt`, `afterAgentThought`, `afterAgentResponse`, `afterFileEdit`, `sessionStart`/`sessionEnd`). This matches how the tool is actually used and gives explicit turn boundaries + exact edit attribution. `afterAgentThought` records the model's reasoning ("thinking") when a reasoning model emits it, so a version is a `(prompt → reasoning → response → diff)` unit; turns with no thinking are stamped `thinking_source = 'none'`.
 - **Claude Code (secondary, already built)** — captured via the local HTTP proxy (`ANTHROPIC_BASE_URL`). Kept as a working second adapter to prove the capture interface generalizes.
 
 The adapter-agnostic core (store, git_ops, aggregator, CLI) is shared by both.
@@ -189,8 +189,9 @@ Build `watcher.py` using `watchfiles`. When the aggregator closes a turn, begin 
 These read from `store` + `git_ops` and work for **any** adapter, so they are built first.
 ```bash
 profact init                    # Phase 1
-profact log [--graph] [--path] [--tests]  # versions on the CURRENT git branch; --graph shows the DAG + HEAD; --path = HEAD ancestry only; --tests prefixes each with its test outcome
+profact log [--graph] [--path] [--tests] [--tag <label>] [--type <type>] [--branch <branch>] [--model <text>] [--file <path>] [--since <age|date>] [--test-status <status>]  # AND-composable filters; --path remains HEAD ancestry and --tests remains the outcome display mode for compatibility
 profact show <id>               # full prompt, response, diff, confidence (warns on 'uncertain')
+profact tag [<id> <label>] [-d <label>] [-f]  # list/create/delete repository-wide labels; --force deliberately moves an existing tag
 profact diff [<a> [<b>]] [--stat|--name-only] [--exit-code]  # compare two versions, a version vs working tree, or (no args) HEAD vs working tree; read-only, cross-branch OK
 profact blame <file> [<id>] [-L N:M] [--show]  # attribute each line to the prompt/version that last wrote it; --show expands prompt+response+hunk; blames any version, follows branch ancestry
 profact why <file>:<line> [<id>]  # sugar for `blame <file> -L line:line --show`: full intent behind one line
@@ -201,12 +202,18 @@ profact status                  # current HEAD id, branch, dirty-vs-HEAD, any op
 profact doctor [--fix]          # report/prune history artifacts: phantom checkpoints, orphaned objects (dangling turns report-only)
 ```
 
+Tags are repository-wide names for immutable version ids, not branch-local
+HEADs. A tag can be used anywhere the CLI accepts a version id (`show`, `diff`,
+`checkout`, `blame`/`why`, `bisect`, `test`, and `note`). Existing cross-branch
+checkout confirmation still applies after resolving a tag. `HEAD` and names
+matching `v<number>` are reserved; moving an existing tag requires `--force`.
+
 ### Phase 6 — Cursor Hooks adapter (primary capture) + `start`
 ```bash
 profact start                   # Cursor mode: install/merge .cursor/hooks.json, run the session the hooks feed
 profact start --claude          # Claude mode: set ANTHROPIC_BASE_URL, launch proxy + watcher, exec `claude`
 ```
-Build `adapters/cursor_hooks.py` + a hidden `profact hook` entry point Cursor calls per event (event name read from the stdin payload). Map hook events into the store: `beforeSubmitPrompt` opens a turn + snapshots `tree_before` + advances HEAD; `afterAgentResponse` records the response text; `stop`/`sessionEnd` snapshot `tree_after` + diff and finalize. `afterFileEdit` is not wired (diffs come from tree snapshots; reserved for future per-edit attribution). No turn-boundary heuristic and no time-window watcher are needed on this path.
+Build `adapters/cursor_hooks.py` + a hidden `profact hook` entry point Cursor calls per event (event name read from the stdin payload). Map hook events into the store: `beforeSubmitPrompt` opens a turn + snapshots `tree_before` + advances HEAD; `afterAgentThought` appends the model's reasoning (aggregated across blocks) and marks `thinking_source = 'captured'`; `afterAgentResponse` records the response text; `stop`/`sessionEnd` snapshot `tree_after` + diff, stamp `thinking_source = 'none'` if no thinking arrived, and finalize. `afterFileEdit` is not wired (diffs come from tree snapshots; reserved for future per-edit attribution). No turn-boundary heuristic and no time-window watcher are needed on this path.
 
 **Hook process model — LOCKED: stateless hooks + DB (no daemon).** Cursor hooks are short-lived processes, so each `profact hook <event>` invocation is a small direct `store.py` write. The only state carried between events is which version is currently open (HEAD + the row whose `tree_after` is null). SQLite (WAL) serializes concurrent `afterFileEdit` writes; crash-safety is free since the DB always reflects completed events.
 

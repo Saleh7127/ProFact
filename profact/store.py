@@ -31,7 +31,9 @@ CREATE TABLE IF NOT EXISTS versions (
     commit_hash     TEXT,
     confidence      TEXT DEFAULT 'high',
     generation_id   TEXT,
-    conversation_id TEXT
+    conversation_id TEXT,
+    thinking_ref    TEXT,
+    thinking_source TEXT
 );
 
 -- One HEAD per Git branch (branch-local HEADs). The legacy .profact/HEAD file
@@ -53,12 +55,34 @@ CREATE TABLE IF NOT EXISTS test_results (
     output_ref  TEXT,
     timestamp   TEXT NOT NULL
 );
+
+-- Repository-wide, human-readable labels for immutable version ids. Tags are
+-- deliberately independent of Git branches: checkout's existing reachability
+-- guard still decides whether following one requires confirmation.
+CREATE TABLE IF NOT EXISTS tags (
+    name        TEXT PRIMARY KEY,
+    version_id  TEXT NOT NULL,
+    created_at  TEXT NOT NULL
+);
 """
 
 TEST_STATUSES = ("pass", "fail", "error")
 
+# How a version's reasoning ("thinking") was obtained:
+#   captured -> the model emitted thinking blocks and we stored them
+#   none     -> the turn finalized without any thinking (model has no reasoning
+#               capability, or none was emitted); shown as an explicit placeholder
+THINKING_CAPTURED = "captured"
+THINKING_NONE = "none"
+THINKING_SOURCES = (THINKING_CAPTURED, THINKING_NONE)
+
 # Columns added after the initial schema; applied to existing DBs on connect.
-_MIGRATION_COLUMNS = (("generation_id", "TEXT"), ("conversation_id", "TEXT"))
+_MIGRATION_COLUMNS = (
+    ("generation_id", "TEXT"),
+    ("conversation_id", "TEXT"),
+    ("thinking_ref", "TEXT"),
+    ("thinking_source", "TEXT"),
+)
 
 
 @dataclass
@@ -79,6 +103,8 @@ class Version:
     confidence: str
     generation_id: str | None = None
     conversation_id: str | None = None
+    thinking_ref: str | None = None
+    thinking_source: str | None = None
 
 
 @dataclass
@@ -89,6 +115,13 @@ class TestResult:
     command: str | None
     output_ref: str | None
     timestamp: str
+
+
+@dataclass
+class Tag:
+    name: str
+    version_id: str
+    created_at: str
 
 
 def profact_dir(repo_root: Path) -> Path:
@@ -150,6 +183,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
         "CREATE TABLE IF NOT EXISTS test_results ("
         "version_id TEXT PRIMARY KEY, status TEXT NOT NULL, exit_code INTEGER, "
         "command TEXT, output_ref TEXT, timestamp TEXT NOT NULL)"
+    )
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS tags ("
+        "name TEXT PRIMARY KEY, version_id TEXT NOT NULL, created_at TEXT NOT NULL)"
     )
     if changed:
         conn.commit()
@@ -245,6 +282,8 @@ def create_version(
     confidence: str = "high",
     generation_id: str | None = None,
     conversation_id: str | None = None,
+    thinking_ref: str | None = None,
+    thinking_source: str | None = None,
 ) -> Version:
     if type not in VERSION_TYPES:
         raise ValueError(f"unknown version type: {type}")
@@ -265,14 +304,16 @@ def create_version(
         confidence=confidence,
         generation_id=generation_id,
         conversation_id=conversation_id,
+        thinking_ref=thinking_ref,
+        thinking_source=thinking_source,
     )
     conn.execute(
         """
         INSERT INTO versions (
             id, parent_id, type, git_branch, timestamp, prompt_ref, response_ref,
             model, temperature, diff_ref, tree_before, tree_after, commit_hash,
-            confidence, generation_id, conversation_id
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            confidence, generation_id, conversation_id, thinking_ref, thinking_source
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """,
         (
             version.id,
@@ -291,6 +332,8 @@ def create_version(
             version.confidence,
             version.generation_id,
             version.conversation_id,
+            version.thinking_ref,
+            version.thinking_source,
         ),
     )
     conn.commit()
@@ -377,12 +420,105 @@ def all_versions(conn: sqlite3.Connection) -> list[Version]:
     return [_row_to_version(row) for row in rows]
 
 
+def set_tag(
+    conn: sqlite3.Connection,
+    name: str,
+    version_id: str,
+    *,
+    force: bool = False,
+) -> Tag:
+    """Create a tag, optionally moving an existing tag to another version."""
+    timestamp = datetime.now(timezone.utc).isoformat()
+    existing = get_tag(conn, name)
+    if existing is not None:
+        if existing.version_id == version_id:
+            return existing
+        if not force:
+            raise ValueError(
+                f"tag '{name}' already points to {existing.version_id}; "
+                "use --force to move it"
+            )
+    conn.execute(
+        """
+        INSERT INTO tags (name, version_id, created_at) VALUES (?, ?, ?)
+        ON CONFLICT(name) DO UPDATE SET
+            version_id = excluded.version_id,
+            created_at = excluded.created_at
+        """,
+        (name, version_id, timestamp),
+    )
+    conn.commit()
+    return Tag(name=name, version_id=version_id, created_at=timestamp)
+
+
+def get_tag(conn: sqlite3.Connection, name: str) -> Tag | None:
+    row = conn.execute(
+        "SELECT name, version_id, created_at FROM tags WHERE name = ?", (name,)
+    ).fetchone()
+    return _row_to_tag(row) if row else None
+
+
+def list_tags(conn: sqlite3.Connection) -> list[Tag]:
+    rows = conn.execute(
+        "SELECT name, version_id, created_at FROM tags ORDER BY name"
+    ).fetchall()
+    return [_row_to_tag(row) for row in rows]
+
+
+def tags_by_version(conn: sqlite3.Connection) -> dict[str, list[str]]:
+    result: dict[str, list[str]] = {}
+    for tag in list_tags(conn):
+        result.setdefault(tag.version_id, []).append(tag.name)
+    return result
+
+
+def resolve_version_id(conn: sqlite3.Connection, token: str) -> str | None:
+    """Resolve a raw version id or tag without handling branch-local HEAD."""
+    if get_version(conn, token) is not None:
+        return token
+    tag = get_tag(conn, token)
+    return tag.version_id if tag else None
+
+
+def delete_tag(conn: sqlite3.Connection, name: str) -> bool:
+    cursor = conn.execute("DELETE FROM tags WHERE name = ?", (name,))
+    conn.commit()
+    return cursor.rowcount > 0
+
+
+def dangling_tags(conn: sqlite3.Connection) -> list[Tag]:
+    rows = conn.execute(
+        """
+        SELECT t.name, t.version_id, t.created_at
+        FROM tags AS t
+        LEFT JOIN versions AS v ON v.id = t.version_id
+        WHERE v.id IS NULL
+        ORDER BY t.name
+        """
+    ).fetchall()
+    return [_row_to_tag(row) for row in rows]
+
+
+def retarget_tags(
+    conn: sqlite3.Connection, old_version_id: str, new_version_id: str | None
+) -> None:
+    """Move tags off a safely-pruned version, or delete them if no parent exists."""
+    if new_version_id is None:
+        conn.execute("DELETE FROM tags WHERE version_id = ?", (old_version_id,))
+    else:
+        conn.execute(
+            "UPDATE tags SET version_id = ? WHERE version_id = ?",
+            (new_version_id, old_version_id),
+        )
+    conn.commit()
+
+
 def referenced_object_ids(conn: sqlite3.Connection) -> set[str]:
     """Every object digest still referenced by a version (prompt/response/diff)
     or a test result (captured output)."""
     refs: set[str] = set()
     for row in conn.execute(
-        "SELECT prompt_ref, response_ref, diff_ref FROM versions"
+        "SELECT prompt_ref, response_ref, diff_ref, thinking_ref FROM versions"
     ):
         refs.update(value for value in row if value)
     for row in conn.execute("SELECT output_ref FROM test_results"):
@@ -463,6 +599,14 @@ def _row_to_test_result(row: sqlite3.Row) -> TestResult:
     )
 
 
+def _row_to_tag(row: sqlite3.Row) -> Tag:
+    return Tag(
+        name=row["name"],
+        version_id=row["version_id"],
+        created_at=row["created_at"],
+    )
+
+
 def heads_pointing_to(conn: sqlite3.Connection, version_id: str) -> list[str]:
     return [
         row["git_branch"]
@@ -503,4 +647,6 @@ def _row_to_version(row: sqlite3.Row) -> Version:
         confidence=row["confidence"],
         generation_id=row["generation_id"] if "generation_id" in row.keys() else None,
         conversation_id=row["conversation_id"] if "conversation_id" in row.keys() else None,
+        thinking_ref=row["thinking_ref"] if "thinking_ref" in row.keys() else None,
+        thinking_source=row["thinking_source"] if "thinking_source" in row.keys() else None,
     )

@@ -56,9 +56,9 @@ def _build_regression(repo: Path) -> dict[str, store.Version]:
     f = repo / "app.py"
     v2 = _prompt(repo, text="good one", mutate=lambda: f.write_text("OK\n"))
     v3 = _prompt(repo, text="good two", mutate=lambda: f.write_text("OK\nmore\n"))
-    v4 = _prompt(repo, text="break it", mutate=lambda: f.write_text("BROKEN\nmore\n"))
-    v5 = _prompt(repo, text="carry on", mutate=lambda: f.write_text("BROKEN\nmore\nx\n"))
-    v6 = _prompt(repo, text="carry more", mutate=lambda: f.write_text("BROKEN\nmore\nx\ny\n"))
+    v4 = _prompt(repo, text="break it", mutate=lambda: f.write_text("FAIL\nmore\n"))
+    v5 = _prompt(repo, text="carry on", mutate=lambda: f.write_text("FAIL\nmore\nx\n"))
+    v6 = _prompt(repo, text="carry more", mutate=lambda: f.write_text("FAIL\nmore\nx\ny\n"))
     return {"v2": v2, "v3": v3, "v4": v4, "v5": v5, "v6": v6}
 
 
@@ -153,10 +153,10 @@ def _build_long_regression(repo: Path) -> dict[str, store.Version]:
         ("g2", "OK\n2\n"),
         ("g3", "OK\n3\n"),  # the snapshot we will force a SKIP on
         ("g4", "OK\n4\n"),
-        ("bug", "BROKEN\n5\n"),  # culprit
-        ("b2", "BROKEN\n6\n"),
-        ("b3", "BROKEN\n7\n"),
-        ("b4", "BROKEN\n8\n"),
+        ("bug", "FAIL\n5\n"),  # culprit
+        ("b2", "FAIL\n6\n"),
+        ("b3", "FAIL\n7\n"),
+        ("b4", "FAIL\n8\n"),
     ]
     for text, content in plan:
         out[text] = _prompt(repo, text=text, mutate=lambda c=content: f.write_text(c))

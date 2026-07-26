@@ -53,6 +53,26 @@ def test_log_lists_branch_versions(git_repo: Path, monkeypatch) -> None:
     assert "HEAD" in result.output
 
 
+def test_log_surfaces_provenance_diff_and_topology(
+    git_repo: Path, monkeypatch
+) -> None:
+    monkeypatch.chdir(git_repo)
+    _make_prompt(
+        git_repo,
+        prompt="create button",
+        mutate=lambda: (git_repo / "button.py").write_text("color = 'blue'\n"),
+    )
+
+    result = runner.invoke(app, ["log"])
+    assert result.exit_code == 0, result.output
+    assert "parent: v1" in result.output
+    assert "1 file +1 -0" in result.output
+    assert "model: claude-test" in result.output
+    assert "thinking: unknown" in result.output
+    assert "tips: v2 (HEAD)" in result.output
+    assert "branch points: -" in result.output
+
+
 def test_show_renders_prompt_response_and_diff(git_repo: Path, monkeypatch) -> None:
     monkeypatch.chdir(git_repo)
     version = _make_prompt(
@@ -288,3 +308,11 @@ def test_log_path_shows_only_head_ancestry(git_repo: Path, monkeypatch) -> None:
     assert v3.id in result.output
     assert "v1" in result.output
     assert v2.id not in result.output
+    assert "HEAD ancestry for branch 'main' (HEAD = v3)" in result.output
+    assert "2 versions shown; 1 side-path version omitted" in result.output
+
+    graph = runner.invoke(app, ["log", "--graph", "--path"])
+    assert graph.exit_code == 0, graph.output
+    assert "HEAD ancestry graph for branch 'main'" in graph.output
+    assert v2.id not in graph.output
+    assert "1 side-path version omitted" in graph.output

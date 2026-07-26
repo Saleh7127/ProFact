@@ -30,7 +30,8 @@ profact/
   git_ops.py          # shadow-index write_tree, diff_trees, checkout_tree, current_branch, add_note
   aggregator.py       # turn-boundary rule, version lifecycle
   watcher.py          # watchfiles loop, quiet-period, human-origin detection
-  cli.py              # typer app: init/start/log/show/checkout/status
+  cli.py              # thin Typer commands + orchestration
+  log_view.py         # log ancestry/filtering/provenance/DAG rendering
   adapters/
     __init__.py
     base.py           # CaptureEvent dataclass, CaptureAdapter Protocol

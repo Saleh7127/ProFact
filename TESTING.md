@@ -30,7 +30,7 @@ and installs the dev dependency (`pytest`).
 pytest -q
 ```
 
-Expected: **76 passed**. Coverage by area:
+Expected: **93 passed**. Coverage by area:
 
 | File | What it proves |
 |------|----------------|
@@ -38,12 +38,14 @@ Expected: **76 passed**. Coverage by area:
 | `test_proxy.py` | Claude proxy forwards + parses SSE, opens one version |
 | `test_watcher.py` | quiet-period finalize + `human` version creation |
 | `test_cli.py` | `log`/`show`/`status`/`checkout`/`diff`, full branching DoD |
-| `test_cursor_hooks.py` | Cursor hook events → versions; `start` installs hooks |
+| `test_cursor_hooks.py` | Cursor hook events → versions; reasoning capture (`afterAgentThought`) + placeholder; `start` installs hooks |
 | `test_phase7.py` | `note` (Git Notes) and `start --claude` wiring |
 | `test_branch_heads.py` | per-branch HEADs, carry-over, cross-branch checkout prompt, `doctor` |
 | `test_blame.py` | line→version attribution, reverts/re-adds, branch ancestry, `blame`/`why` |
 | `test_bisect.py` | binary-search culprit, endpoint validation, skips, tree/HEAD restore |
 | `test_testrunner.py` | record pass/fail/error per version, display in show/status/log, doctor keeps output |
+| `test_tags.py` | create/list/delete/move tags, tag refs, cross-branch guard, doctor repair |
+| `test_log_filters.py` | tag/type/branch/model/file/time/test filters, composition, compatibility |
 
 ---
 
@@ -101,6 +103,70 @@ Branch backward and confirm nothing is lost:
 profact checkout v2         # button.py is blue again; v3 still exists in log
 ```
 
+### Name important versions with tags
+
+Tags are repository-wide labels for versions. They do not move HEAD or alter the
+DAG, and existing cross-branch checkout confirmation still applies.
+
+```bash
+profact tag v2 working      # create
+profact tag                 # list: working -> v2
+profact show working        # tags resolve anywhere a version id is accepted
+profact diff v1 working
+profact checkout working
+profact tag v3 working      # refused: prevents an accidental move
+profact tag v3 working -f   # deliberately move the existing tag
+profact tag -d working      # delete
+```
+
+Tag names may contain letters, numbers, `.`, `_`, and `-`. `HEAD` and
+version-looking names such as `v7` are reserved so references remain
+unambiguous. `profact log` appends tags as `<working>`, while `profact show`
+prints a `tags:` metadata line. `profact doctor` reports and safely removes
+dangling tags; tags on pruned phantom checkpoints are retargeted to the
+checkpoint's parent.
+
+### Capturing the model's reasoning ("thinking")
+
+When a **reasoning model** is used, Cursor emits its thinking via the
+`afterAgentThought` hook (fully aggregated text per block). profact stores that
+alongside the prompt, response, and diff, so `(prompt → reasoning → response →
+diff)` becomes one navigable unit. Multiple blocks in a turn are concatenated.
+
+```bash
+python - <<'PY'
+from pathlib import Path
+from profact.adapters import cursor_hooks
+repo = Path("/tmp/pf-demo")
+def ev(name, **k): return {"hook_event_name": name, "generation_id": "g9", **k}
+cursor_hooks.handle(repo, ev("beforeSubmitPrompt", prompt="optimize the loop"))
+cursor_hooks.handle(repo, ev("afterAgentThought", text="The loop is O(n^2); use a set.", duration_ms=1400))
+(repo/"loop.py").write_text("seen = set()\n")
+cursor_hooks.handle(repo, ev("afterAgentResponse", text="Done."))
+cursor_hooks.handle(repo, ev("stop"))
+PY
+
+profact show <that version>   # now includes a `thinking:` section
+```
+
+Models **without** a thinking capability never fire `afterAgentThought`. Those
+turns are stamped honestly and `profact show` prints an explicit placeholder
+rather than pretending reasoning was captured:
+
+```
+thinking:
+  (no reasoning captured — the model has no thinking capability, or none was
+   emitted for this turn)
+```
+
+To confirm what your Cursor version actually delivers, enable the probe and
+inspect the raw payloads it appends to `.profact/hook-events.log`:
+
+```bash
+PROFACT_HOOK_DEBUG=1   # export before Cursor launches the hooks
+# ...run a prompt with a reasoning model, then read .profact/hook-events.log
+```
+
 ---
 
 ## 4. Git branches — per-branch HEADs with carry-over
@@ -129,18 +195,26 @@ profact log     # shows v1, v2 (carried over, labeled (main)) + v3 (experiment)
 ```
 
 The `(branch)` column shows where each version was created — the shared trunk
-stays `(main)` while your new work is `(experiment)`:
+stays `(main)` while your new work is `(experiment)`. Each version also has a
+provenance line with UTC time, parent, changed-file/diff statistics, model,
+thinking availability, and non-default confidence:
 
 ```
 v3    HEAD [prompt    ] (experiment)   experiment work
+      2026-07-26 13:15Z · parent: v2 · 1 file +1 -0 · model: ... · thinking: none
 v2         [prompt    ] (main)         make the button blue
+      2026-07-26 13:10Z · parent: v1 · 1 file +1 -0 · model: ... · thinking: captured
 v1         [anchor    ] (main)         start of history @ ...
+      2026-07-26 13:00Z · parent: -
+
+tips: v3 (HEAD)
+branch points: -
 ```
 
-`profact log` is a terse flat list. `profact log --graph` draws the actual DAG
-with ASCII lanes (`*` = a version, `|` = a lane, `/` = lanes converging on a
-shared parent), plus a `tips:` / `branch points:` footer — most useful once
-history forks:
+`profact log` is a rich flat view: parent metadata plus its `tips:` /
+`branch points:` footer prevent side paths from looking like one linear chain.
+`profact log --graph` adds the actual DAG lanes (`*` = a version, `|` = a lane,
+`/` = lanes converging on a shared parent) — most useful once history forks:
 
 ```
 * v5    HEAD [prompt    ] (experiment)   ...
@@ -150,6 +224,34 @@ history forks:
 * v2         [prompt    ] (main)         ...
 * v1         [anchor    ] (main)         ...
 ```
+
+`profact log --path` prints a clear `HEAD ancestry` heading, follows only the
+current HEAD's parent chain, and reports how many side-path versions it omitted.
+
+Filter that history without changing Git branches:
+
+```bash
+profact log --tag working
+profact log --type prompt
+profact log --branch experiment
+profact log --model claude
+profact log --file calculator.py
+profact log --since 7d
+profact log --since 2026-07-01
+profact log --test-status fail
+
+# Filters combine with AND:
+profact log --branch experiment --tag buggy --test-status fail
+```
+
+`--file` also accepts a directory or a basename within a nested path.
+`--since` accepts minutes (`30m`), hours (`12h`), days (`7d`), weeks (`2w`), or
+an ISO date/time. `--test-status` accepts `pass`, `fail`, `error`, or `untested`
+and automatically enables test markers/details.
+
+The names deliberately preserve existing behavior: bare `--path` still means
+HEAD ancestry, and bare `--tests` still displays all outcomes. Therefore the new
+filters are named `--file` (alias `--changed-path`) and `--test-status`.
 
 Now go back to `main` and confirm the branches stay independent:
 
@@ -310,15 +412,18 @@ See the outcomes anywhere versions appear:
 ```bash
 profact show v6        # includes a `test:` line when a result exists
 profact status         # shows HEAD's test outcome
-profact log --tests    # prefixes each row with [pass] / [FAIL] / [err ]
+profact log --tests    # [pass] / [FAIL] / [err ] / [none] + detail and summary
 ```
 
 Example `log --tests`:
 
 ```
 [FAIL] v6    HEAD [prompt    ] (main)  cache the file handle
+       ... · test: fail exit 1 (pytest -q)
 [pass] v5         [prompt    ] (main)  add unit tests
-[pass] v4         [prompt    ] (main)  add the parser
+[none] v4         [prompt    ] (main)  add the parser
+
+tests: 1 passed, 1 failed, 0 errors, 1 untested
 ```
 
 This is the foundation for outcome-aware analysis (which prompts produced passing

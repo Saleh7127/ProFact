@@ -7,8 +7,14 @@ HEAD prompt version whose ``tree_after`` is still NULL (LOCKED decision (b)).
 
 Event flow for one user turn:
     beforeSubmitPrompt  -> open a `prompt` version, snapshot tree_before, move HEAD
+    afterAgentThought   -> append the model's reasoning to the open version
     afterAgentResponse  -> append the assistant text to the open version
     stop / sessionEnd   -> snapshot tree_after, compute the diff, finalize
+
+Reasoning ("thinking") is captured only for models that emit structured thinking
+blocks; `afterAgentThought` never fires for non-reasoning models. A turn that
+finalizes without any thinking is stamped ``thinking_source = 'none'`` so history
+honestly records that reasoning was unavailable rather than merely unrecorded.
 
 Diffs come from Git-tree snapshots (same mechanism as the proxy path), so
 `afterFileEdit` is not required for capture and is intentionally not wired.
@@ -21,12 +27,19 @@ from pathlib import Path
 from .. import git_ops, store
 
 EVENT_PROMPT = "beforeSubmitPrompt"
+EVENT_THOUGHT = "afterAgentThought"
 EVENT_RESPONSE = "afterAgentResponse"
 EVENT_STOP = "stop"
 EVENT_SESSION_END = "sessionEnd"
 
 # Events profact registers in .cursor/hooks.json (see cli.start).
-HANDLED_EVENTS = (EVENT_PROMPT, EVENT_RESPONSE, EVENT_STOP, EVENT_SESSION_END)
+HANDLED_EVENTS = (
+    EVENT_PROMPT,
+    EVENT_THOUGHT,
+    EVENT_RESPONSE,
+    EVENT_STOP,
+    EVENT_SESSION_END,
+)
 
 
 def handle(repo_root: Path, event: dict) -> dict:
@@ -41,6 +54,8 @@ def handle(repo_root: Path, event: dict) -> dict:
     name = event.get("hook_event_name")
     if name == EVENT_PROMPT:
         _on_prompt(repo_root, event)
+    elif name == EVENT_THOUGHT:
+        _on_thought(repo_root, event)
     elif name == EVENT_RESPONSE:
         _on_response(repo_root, event)
     elif name in (EVENT_STOP, EVENT_SESSION_END):
@@ -70,6 +85,33 @@ def _on_prompt(repo_root: Path, event: dict) -> None:
             conversation_id=event.get("conversation_id"),
         )
     store.write_head(repo_root, branch, version.id)
+
+
+def _on_thought(repo_root: Path, event: dict) -> None:
+    """Append one reasoning block to the open turn.
+
+    A thinking model can emit several blocks per turn (interleaved with tool
+    calls), so blocks are aggregated onto the same version, mirroring responses.
+    """
+    text = event.get("text") or ""
+    if not text:
+        return
+    with store.connect(repo_root) as conn:
+        version = _open_prompt(repo_root, conn)
+        if version is None:
+            return
+        existing = (
+            store.read_object(repo_root, version.thinking_ref)
+            if version.thinking_ref
+            else None
+        )
+        combined = f"{existing}\n{text}" if existing else text
+        thinking_ref = store.write_object(repo_root, combined)
+        conn.execute(
+            "UPDATE versions SET thinking_ref = ?, thinking_source = ? WHERE id = ?",
+            (thinking_ref, store.THINKING_CAPTURED, version.id),
+        )
+        conn.commit()
 
 
 def _on_response(repo_root: Path, event: dict) -> None:
@@ -102,9 +144,12 @@ def _finalize_open(repo_root: Path, conn: sqlite3.Connection) -> None:
     tree_after = git_ops.write_tree(repo_root)
     diff = git_ops.diff_trees(repo_root, version.tree_before, tree_after)
     diff_ref = store.write_object(repo_root, diff) if diff.strip() else None
+    # Stamp an explicit "no reasoning" marker if no thinking block ever arrived,
+    # so history distinguishes "model can't/didn't think" from "not yet recorded".
     conn.execute(
-        "UPDATE versions SET tree_after = ?, diff_ref = ? WHERE id = ?",
-        (tree_after, diff_ref, version.id),
+        "UPDATE versions SET tree_after = ?, diff_ref = ?, "
+        "thinking_source = COALESCE(thinking_source, ?) WHERE id = ?",
+        (tree_after, diff_ref, store.THINKING_NONE, version.id),
     )
     conn.commit()
 

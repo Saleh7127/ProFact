@@ -3,9 +3,11 @@
 > Status: **ideation only.** Nothing here is implemented yet. This document
 > collects directions to grow the current MVP into a full product and a strong
 > thesis. The MVP already delivers: capture (Cursor hooks + Claude proxy),
-> content-addressed storage, a prompt DAG with per-branch carry-over HEADs, safe
-> `checkout`, `log/show/status/diff`, `blame`/`why`, `bisect`, `test` (outcome
-> recording), `note`, and `doctor`.
+> including model **reasoning capture** (`afterAgentThought`) alongside each
+> prompt/response/diff, content-addressed storage, a prompt DAG with per-branch
+> carry-over HEADs, safe `checkout`, `log/show/status/diff`, `blame`/`why`,
+> `bisect`, `test` (outcome recording), repository-wide `tag`, `note`, and
+> `doctor`.
 >
 > Ideas were drafted here and cross-checked against a GPT-5.5 brainstorm
 > ([feature brainstorm](ee5efa3b-3992-419d-b8c7-78b216e6fe66)).
@@ -47,8 +49,9 @@ Effort/Impact are rough (Low / Med / High). ★ = strong thesis contribution.
 - **`profact diff <a> <b>`** — ✅ **implemented.** Compare any two versions, a
   version against the working tree (`diff <a>`), or HEAD against the working tree
   (`diff`); `--stat` / `--name-only`; read-only and cross-branch. *Impact: High · Effort: Med.*
-- **`profact tag <id> <label>`** — lightweight labels (`working`, `buggy`,
-  `demo`, `regression-source`). *Impact: Med · Effort: Low.*
+- **`profact tag <id> <label>`** — ✅ **implemented.** Repository-wide labels
+  (`working`, `buggy`, `demo`, `regression-source`) resolve anywhere a version
+  id is accepted; accidental moves are guarded by `--force`. *Impact: Med · Effort: Low.*
 - **Named prompt-branches** — name divergent prompt lines independently of Git
   branches, so experiments don't each need a Git branch. *Impact: High · Effort: Med.*
 - **Undo / redo stack** — human-friendly movement over the DAG for users who
@@ -79,8 +82,15 @@ Effort/Impact are rough (Low / Med / High). ★ = strong thesis contribution.
   changed, or removed it. *Impact: High · Effort: Med.*
 - **Semantic prompt search** — search by meaning ("auth bug", "made UI
   responsive"), not just substring. ★ *Impact: High · Effort: High.*
-- **Rich `log` filters** — by path, model, confidence, type, branch, tag, time.
+- **Rich `log` filters** — ✅ **implemented.** AND-composable filtering by tag,
+  type, Git branch, model substring, changed file/directory, age/ISO date, and
+  test status. Existing ancestry `--path` and display-only `--tests` remain
+  compatible via new `--file` and `--test-status` filter names.
   *Impact: High · Effort: Med.*
+- **Rich `log` presentation** — ✅ **implemented.** Plain and graph modes expose
+  timestamp, parent, diffstat, model, thinking/confidence, tags, tips and branch
+  points; `--path` reports omitted side paths; `--tests` distinguishes untested
+  versions and summarizes outcomes. *Impact: High · Effort: Med.*
 - **"Why this changed"** — for a hunk, surface prompt + response excerpt + model
   metadata + neighboring versions in one view. *Impact: High · Effort: Med.*
 - **Dead-end detection** — flag abandoned/reverted prompt branches. *Impact: Med · Effort: Med.*
@@ -94,8 +104,9 @@ Effort/Impact are rough (Low / Med / High). ★ = strong thesis contribution.
   branch compare. Great for demos. *Impact: Very High · Effort: High.*
 - **Session replay view** — step through a session prompt-by-prompt and watch
   files evolve; excellent for teaching, demos, and studies. ★ *Impact: High · Effort: High.*
-- **DAG graph rendering** — branches with version types, origin branch,
-  confidence, and checkout state. *Impact: High · Effort: Med.*
+- **DAG graph rendering** — ✅ **implemented.** ASCII lanes expose forks,
+  convergence, tips, branch points, version types, origin branch, and HEAD.
+  *Impact: High · Effort: Med.*
 - **Diff heatmap** — which files churn most across turns. *Impact: Med · Effort: Med.*
 
 ### 3.4 Collaboration & sharing
@@ -202,8 +213,8 @@ Effort/Impact are rough (Low / Med / High). ★ = strong thesis contribution.
 ## 4. Suggested phased roadmap
 
 **Phase A — Make history useful (CLI power tools)**
-`profact diff` ✅, `blame`/`why` ✅, `bisect` ✅ done. Remaining: `tag` and rich
-`log` filters. Highest value-per-effort; each is a standalone, demoable win.
+`profact diff` ✅, `blame`/`why` ✅, `bisect` ✅, `tag` ✅, and rich `log`
+filters ✅ are done. Phase A is complete.
 
 **Phase B — Make history visible**
 Interactive TUI first (no server), then a local web dashboard, then an

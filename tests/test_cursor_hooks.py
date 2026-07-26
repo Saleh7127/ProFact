@@ -199,6 +199,81 @@ def test_write_tree_excludes_hook_infra_regardless_of_gitignore(
     assert not any(f.startswith(".profact") for f in files)
 
 
+def test_thinking_is_captured_when_thought_events_fire(git_repo: Path) -> None:
+    cursor_hooks.handle(
+        git_repo, _event("beforeSubmitPrompt", prompt="refactor it", model="claude")
+    )
+    cursor_hooks.handle(
+        git_repo, _event("afterAgentThought", text="First I'll read the file.", duration_ms=1200)
+    )
+    (git_repo / "r.py").write_text("z = 1\n")
+    cursor_hooks.handle(git_repo, _event("afterAgentResponse", text="Refactored."))
+    cursor_hooks.handle(git_repo, _event("stop"))
+
+    version = _prompts(git_repo)[0]
+    assert version.thinking_source == store.THINKING_CAPTURED
+    assert version.thinking_ref is not None
+    assert store.read_object(git_repo, version.thinking_ref) == "First I'll read the file."
+
+
+def test_thinking_aggregates_multiple_blocks(git_repo: Path) -> None:
+    cursor_hooks.handle(git_repo, _event("beforeSubmitPrompt", prompt="do it"))
+    cursor_hooks.handle(git_repo, _event("afterAgentThought", text="Step one."))
+    cursor_hooks.handle(git_repo, _event("afterAgentThought", text="Step two."))
+    cursor_hooks.handle(git_repo, _event("stop"))
+
+    version = _prompts(git_repo)[0]
+    assert store.read_object(git_repo, version.thinking_ref) == "Step one.\nStep two."
+    assert version.thinking_source == store.THINKING_CAPTURED
+
+
+def test_no_thinking_marks_source_none(git_repo: Path) -> None:
+    # A non-reasoning model never fires afterAgentThought.
+    cursor_hooks.handle(git_repo, _event("beforeSubmitPrompt", prompt="quick one"))
+    cursor_hooks.handle(git_repo, _event("afterAgentResponse", text="Done."))
+    cursor_hooks.handle(git_repo, _event("stop"))
+
+    version = _prompts(git_repo)[0]
+    assert version.thinking_ref is None
+    assert version.thinking_source == store.THINKING_NONE
+
+
+def test_show_displays_thinking_then_placeholder(git_repo: Path, monkeypatch) -> None:
+    monkeypatch.chdir(git_repo)
+    # v2: a reasoning turn.
+    cursor_hooks.handle(git_repo, _event("beforeSubmitPrompt", prompt="think hard"))
+    cursor_hooks.handle(git_repo, _event("afterAgentThought", text="Weighing options."))
+    cursor_hooks.handle(git_repo, _event("stop"))
+    # v3: a no-reasoning turn.
+    cursor_hooks.handle(git_repo, _event("beforeSubmitPrompt", prompt="no think"))
+    cursor_hooks.handle(git_repo, _event("stop"))
+
+    shown = runner.invoke(app, ["show", "v2"])
+    assert shown.exit_code == 0, shown.output
+    assert "thinking:" in shown.output
+    assert "Weighing options." in shown.output
+
+    placeholder = runner.invoke(app, ["show", "v3"])
+    assert placeholder.exit_code == 0, placeholder.output
+    assert "thinking:" in placeholder.output
+    assert "no reasoning captured" in placeholder.output
+
+
+def test_hook_debug_probe_logs_raw_events(git_repo: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PROFACT_HOOK_DEBUG", "1")
+    payload = json.dumps(
+        _event("afterAgentThought", text="probe me", workspace_roots=[str(git_repo)])
+    )
+    result = runner.invoke(app, ["hook"], input=payload)
+    assert result.exit_code == 0
+
+    log = store.profact_dir(git_repo) / "hook-events.log"
+    assert log.exists()
+    logged = json.loads(log.read_text().splitlines()[-1])
+    assert logged["hook_event_name"] == "afterAgentThought"
+    assert logged["text"] == "probe me"
+
+
 def test_start_preserves_existing_unrelated_hooks(git_repo: Path, monkeypatch) -> None:
     monkeypatch.chdir(git_repo)
     cursor_dir = git_repo / ".cursor"

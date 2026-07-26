@@ -131,10 +131,14 @@ def test_log_tests_flag_shows_markers_plain_log_does_not(git_repo: Path, monkeyp
     with_tests = runner.invoke(app, ["log", "--tests"])
     assert with_tests.exit_code == 0, with_tests.output
     assert "[FAIL]" in with_tests.output
+    assert "[none]" in with_tests.output  # anchor has no recorded result
+    assert "test: fail exit 3" in with_tests.output
+    assert "tests: 0 passed, 1 failed, 0 errors, 1 untested" in with_tests.output
 
     plain = runner.invoke(app, ["log"])
     assert plain.exit_code == 0, plain.output
     assert "[FAIL]" not in plain.output  # markers are opt-in
+    assert "[none]" not in plain.output
 
 
 def test_doctor_keeps_referenced_test_output_blob(git_repo: Path, monkeypatch) -> None:
