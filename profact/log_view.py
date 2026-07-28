@@ -1,23 +1,128 @@
-"""Query helpers and terminal rendering for ``profact log``.
-
-The CLI module owns argument parsing and user-facing validation. This module
-owns the branch-history view: ancestry selection helpers, AND-composable
-filters, provenance formatting, ASCII DAG rendering, and test summaries.
-Keeping these responsibilities together prevents the top-level CLI from
-becoming the implementation layer for every history feature.
-"""
+"""Query preparation and terminal rendering for ``profact log``."""
 
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import typer
 
-from . import store, testrunner
+from . import git_ops, store, testrunner
 
 _GRAPH_GUTTER = 8
+
+
+class LogQueryError(ValueError):
+    """A user-facing query validation error with its CLI exit code."""
+
+    def __init__(self, message: str, *, exit_code: int) -> None:
+        super().__init__(message)
+        self.exit_code = exit_code
+
+
+@dataclass(frozen=True)
+class PreparedLog:
+    branch: str
+    head: str | None
+    base_versions: list[store.Version]
+    versions: list[store.Version]
+    tests: dict[str, store.TestResult] | None
+    tags: dict[str, list[str]]
+    omitted: int
+    filtered_out: int
+    filters: list[str]
+
+
+def prepare_query(
+    repo_root: Path,
+    *,
+    path_mode: bool,
+    show_tests: bool,
+    tag: str | None,
+    version_type: str | None,
+    branch_filter: str | None,
+    model: str | None,
+    changed_path: str | None,
+    since: str | None,
+    test_status: str | None,
+) -> PreparedLog:
+    """Validate options, load branch history, and apply all requested filters."""
+    branch = branch_filter or git_ops.current_branch(repo_root)
+    head = store.read_head(repo_root, branch, seed=False)
+
+    normalized_type = version_type.lower() if version_type else None
+    if normalized_type and normalized_type not in store.VERSION_TYPES:
+        raise LogQueryError(
+            f"unknown version type '{normalized_type}'; "
+            f"choose from {', '.join(store.VERSION_TYPES)}",
+            exit_code=2,
+        )
+
+    normalized_test_status = normalize_test_filter(test_status)
+    if test_status and normalized_test_status is None:
+        raise LogQueryError(
+            f"unknown test status '{test_status}'; "
+            "choose pass, fail, error, or untested",
+            exit_code=2,
+        )
+
+    try:
+        since_cutoff = parse_since(since) if since else None
+        normalized_path = normalize_path(repo_root, changed_path) if changed_path else None
+    except ValueError as exc:
+        raise LogQueryError(str(exc), exit_code=2) from exc
+
+    include_tests = show_tests or normalized_test_status is not None
+    with store.connect(repo_root) as conn:
+        if path_mode:
+            base_versions = ancestry(conn, head)
+            visible = store.list_branch_versions(conn, branch, head=head)
+            omitted = max(0, len(visible) - len(base_versions))
+        else:
+            base_versions = store.list_branch_versions(conn, branch, head=head)
+            omitted = 0
+        tests = store.all_test_results(conn) if include_tests else None
+        tags = store.tags_by_version(conn)
+        if tag and store.get_tag(conn, tag) is None:
+            raise LogQueryError(f"no such tag '{tag}'", exit_code=1)
+
+    base_versions = sorted(
+        base_versions, key=lambda version: version.timestamp, reverse=True
+    )
+    versions = filter_versions(
+        repo_root,
+        base_versions,
+        tags=tags,
+        tests=tests or {},
+        tag=tag,
+        version_type=normalized_type,
+        model=model,
+        changed_path=normalized_path,
+        since_cutoff=since_cutoff,
+        test_status=normalized_test_status,
+    )
+    filters = filter_description(
+        branch_filter=branch_filter,
+        tag=tag,
+        version_type=normalized_type,
+        model=model,
+        changed_path=normalized_path,
+        since=since,
+        test_status=normalized_test_status,
+    )
+    return PreparedLog(
+        branch=branch,
+        head=head,
+        base_versions=base_versions,
+        versions=versions,
+        tests=tests,
+        tags=tags,
+        omitted=omitted,
+        filtered_out=len(base_versions) - len(versions),
+        filters=filters,
+    )
 
 
 def ancestry(conn, head_id: str | None) -> list[store.Version]:

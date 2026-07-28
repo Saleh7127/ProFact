@@ -256,6 +256,18 @@ def _write_global_head(repo_root: Path, version_id: str) -> None:
     head_path(repo_root).write_text(version_id)
 
 
+def clear_global_head_if_missing(repo_root: Path) -> bool:
+    """Clear the carry-over pointer if its version has been removed."""
+    global_head = _read_global_head(repo_root)
+    if not global_head:
+        return False
+    with connect(repo_root) as conn:
+        if get_version(conn, global_head) is not None:
+            return False
+    _write_global_head(repo_root, "")
+    return True
+
+
 def next_version_id(conn: sqlite3.Connection) -> str:
     highest = 0
     for row in conn.execute("SELECT id FROM versions"):

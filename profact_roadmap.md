@@ -1,8 +1,9 @@
 # profact — Ideas & Roadmap
 
-> Status: **ideation only.** Nothing here is implemented yet. This document
-> collects directions to grow the current MVP into a full product and a strong
-> thesis. The MVP already delivers: capture (Cursor hooks + Claude proxy),
+> Status: **living roadmap.** Completed items are marked below; unmarked items
+> remain proposals. This document collects directions to grow the current MVP
+> into a full product and a strong thesis. The MVP already delivers: capture
+> (Cursor hooks + Claude proxy),
 > including model **reasoning capture** (`afterAgentThought`) alongside each
 > prompt/response/diff, content-addressed storage, a prompt DAG with per-branch
 > carry-over HEADs, safe `checkout`, `log/show/status/diff`, `blame`/`why`,
@@ -277,3 +278,93 @@ Keep scope honest: no full merge of divergent prompt DAGs across machines, no
 hosted multi-tenant service, no attempt to replace Git, and no automatic
 prompt-quality "grading" that users can't inspect. These can come later, but
 chasing them early would dilute the core.
+
+---
+
+## 8. Current status and remaining work
+
+This section is the execution checklist. Earlier sections explain the product
+ideas; this section records what is done, what should be built next, and what is
+deliberately deferred.
+
+### Done
+
+- [x] Cursor Hooks and Claude Code proxy capture adapters.
+- [x] Prompt, reasoning, response, model metadata, tree snapshot, and diff
+  capture.
+- [x] Content-addressed object storage and SQLite metadata.
+- [x] Prompt DAG with branch-local HEADs and Git-branch carry-over.
+- [x] Safe checkout with automatic checkpoints and protected ignored files.
+- [x] `init`, `start`, `log`, `show`, `status`, `diff`, `checkout`, `note`, and
+  `doctor`.
+- [x] Prompt attribution through `blame` and `why`.
+- [x] Regression search through `bisect`.
+- [x] Test-result recording and display through `test` and `log --tests`.
+- [x] Repository-wide tags usable as version references.
+- [x] Rich log filtering by tag, type, branch, model, changed path, time, and
+  test status.
+- [x] CLI responsibility cleanup: checkout, doctor, Cursor setup, and log query
+  preparation live outside `cli.py`.
+
+### Next milestone — make existing history immediately useful
+
+- [ ] Implement `profact health`, initially as a CLI report.
+  - Summarize prompt, human-edit, checkpoint, and branch counts.
+  - Summarize passed, failed, errored, and untested versions.
+  - Identify high-churn files and repeatedly rewritten areas.
+  - Surface uncertain attribution, dangling turns, and abandoned side paths.
+  - Highlight versions worth inspecting with `show`, `blame`, or `bisect`.
+  - Keep calculations inspectable; do not emit an unexplained quality score.
+- [ ] Add focused tests for every health metric and empty/partial-history cases.
+- [ ] Document a reproducible demo session that produces meaningful health
+  output.
+
+### Then — make history visible
+
+- [ ] Build an interactive TUI over the existing read-only APIs.
+  - DAG and branch navigation.
+  - Prompt, reasoning, response, and diff panes.
+  - Tag, test, confidence, and health indicators.
+  - Filters and version search.
+  - Safe checkout only after explicit confirmation.
+- [ ] Use the TUI as the eventual home for replay comparison and other visual
+  analyses.
+- [ ] Consider a local web dashboard and editor panel only after the TUI proves
+  the information architecture.
+
+### Trust and robustness work
+
+- [ ] Add crash recovery for dangling open turns: finalize, preserve, or discard
+  with explicit user choice.
+- [ ] Add a secret scanner for prompts, responses, reasoning, and diffs.
+- [ ] Add configurable redaction and private-path opt-out.
+- [ ] Add `profact.toml` for capture, privacy, test, retention, and UI settings.
+- [ ] Make Git branch carry-over precise with branch-switch observation.
+- [ ] Add multi-session event routing before claiming concurrent-session
+  support; solve or clearly mark overlapping-edit attribution.
+- [ ] Profile and optimize snapshotting for large repositories.
+
+### Deferred features
+
+- [ ] **Replay on a new base.** Revisit with the TUI. A complete replay feature
+  must preserve the source version, create a new version on the selected base,
+  record `replayed_from`, and compare the two transformations:
+  source parent → source versus replay base → replay result. Cursor replay is
+  assisted unless Cursor exposes a supported prompt-submission API; automated
+  replay can initially target Claude Code in an isolated worktree.
+- [ ] Named prompt branches independent of Git branches.
+- [ ] Human-friendly undo/redo navigation over safe checkout.
+- [ ] Patch/bundle export and safe-sharing preview, only after privacy controls.
+- [ ] Prompt-lineage code review and `.profactbundle` exchange.
+- [ ] Dataset export, reproducibility protocol, and intent-to-diff evaluation.
+- [ ] Retention, pruning, and archival policies.
+- [ ] Additional capture adapters and optional team synchronization.
+
+### Recommended order
+
+1. `profact health`.
+2. Interactive TUI.
+3. Crash recovery.
+4. Secret scanning, redaction, and private-path rules.
+5. Replay with transformation-to-transformation comparison.
+6. Export, research tooling, and productionization.

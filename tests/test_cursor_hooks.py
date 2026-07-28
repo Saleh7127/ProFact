@@ -75,6 +75,94 @@ def test_prompt_closes_dangling_turn_when_stop_missing(git_repo: Path) -> None:
     assert prompts[0].tree_after is not None  # auto-finalized on next prompt
 
 
+def test_manual_edits_between_prompts_become_one_human_version(
+    git_repo: Path,
+) -> None:
+    cursor_hooks.handle(git_repo, _event("beforeSubmitPrompt", gen="g1", prompt="first"))
+    cursor_hooks.handle(git_repo, _event("stop", gen="g1"))
+    first = _prompts(git_repo)[0]
+
+    # Several saves and multiple files still represent one manual-edit interval.
+    manual = git_repo / "manual.py"
+    manual.write_text("draft 1\n")
+    manual.write_text("draft 2\n")
+    manual.write_text("final\n")
+    (git_repo / "notes.py").write_text("also by hand\n")
+
+    cursor_hooks.handle(git_repo, _event("beforeSubmitPrompt", gen="g2", prompt="second"))
+
+    with store.connect(git_repo) as conn:
+        versions = store.list_versions(conn, "main")
+    humans = [version for version in versions if version.type == "human"]
+    prompts = [version for version in versions if version.type == "prompt"]
+
+    assert len(humans) == 1
+    assert len(prompts) == 2
+    human = humans[0]
+    second = prompts[1]
+    assert human.parent_id == first.id
+    assert second.parent_id == human.id
+    assert second.tree_before == human.tree_after
+    diff = store.read_object(git_repo, human.diff_ref)
+    assert "manual.py" in diff and "notes.py" in diff
+    assert "final" in diff
+    assert "draft 1" not in diff and "draft 2" not in diff
+
+
+def test_manual_delta_is_excluded_from_following_prompt_diff(git_repo: Path) -> None:
+    cursor_hooks.handle(git_repo, _event("beforeSubmitPrompt", gen="g1", prompt="first"))
+    cursor_hooks.handle(git_repo, _event("stop", gen="g1"))
+
+    (git_repo / "manual.py").write_text("human\n")
+    cursor_hooks.handle(git_repo, _event("beforeSubmitPrompt", gen="g2", prompt="second"))
+    (git_repo / "agent.py").write_text("agent\n")
+    cursor_hooks.handle(git_repo, _event("stop", gen="g2"))
+
+    with store.connect(git_repo) as conn:
+        versions = store.list_versions(conn, "main")
+    human = next(version for version in versions if version.type == "human")
+    prompt = [version for version in versions if version.type == "prompt"][-1]
+    human_diff = store.read_object(git_repo, human.diff_ref)
+    prompt_diff = store.read_object(git_repo, prompt.diff_ref)
+    assert "manual.py" in human_diff and "agent.py" not in human_diff
+    assert "agent.py" in prompt_diff and "manual.py" not in prompt_diff
+
+
+def test_reverted_manual_edit_does_not_create_human_version(git_repo: Path) -> None:
+    cursor_hooks.handle(git_repo, _event("beforeSubmitPrompt", gen="g1", prompt="first"))
+    cursor_hooks.handle(git_repo, _event("stop", gen="g1"))
+
+    original = (git_repo / "a.txt").read_text()
+    (git_repo / "a.txt").write_text("temporary\n")
+    (git_repo / "a.txt").write_text(original)
+    cursor_hooks.handle(git_repo, _event("beforeSubmitPrompt", gen="g2", prompt="second"))
+
+    with store.connect(git_repo) as conn:
+        humans = [
+            version
+            for version in store.list_versions(conn, "main")
+            if version.type == "human"
+        ]
+    assert humans == []
+
+
+def test_session_end_captures_manual_edits_after_last_prompt(git_repo: Path) -> None:
+    cursor_hooks.handle(git_repo, _event("beforeSubmitPrompt", prompt="first"))
+    cursor_hooks.handle(git_repo, _event("stop"))
+    (git_repo / "manual.py").write_text("after prompt\n")
+
+    cursor_hooks.handle(git_repo, _event("sessionEnd"))
+
+    with store.connect(git_repo) as conn:
+        humans = [
+            version
+            for version in store.list_versions(conn, "main")
+            if version.type == "human"
+        ]
+    assert len(humans) == 1
+    assert "manual.py" in store.read_object(git_repo, humans[0].diff_ref)
+
+
 def test_no_file_change_yields_empty_diff(git_repo: Path) -> None:
     cursor_hooks.handle(git_repo, _event("beforeSubmitPrompt", prompt="just a question"))
     cursor_hooks.handle(git_repo, _event("afterAgentResponse", text="Here's the answer."))

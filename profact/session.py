@@ -5,7 +5,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import git_ops, store
+from . import git_ops, human_edits, store
 from .adapters.base import CaptureEvent
 from .aggregator import Turn, TurnAggregator
 
@@ -124,30 +124,7 @@ class CaptureSession:
             conn.commit()
 
     def _create_human_version(self) -> None:
-        branch = git_ops.current_branch(self.repo_root)
-        head_id = store.read_head(self.repo_root, branch)
-        tree_after = git_ops.write_tree(self.repo_root)
-        tree_before = tree_after
-        if head_id is not None:
-            with store.connect(self.repo_root) as conn:
-                parent = store.get_version(conn, head_id)
-            if parent is not None:
-                tree_before = parent.tree_after or parent.tree_before
-        if tree_before == tree_after:
-            return
-        diff = git_ops.diff_trees(self.repo_root, tree_before, tree_after)
-        diff_ref = store.write_object(self.repo_root, diff) if diff.strip() else None
-        with store.connect(self.repo_root) as conn:
-            version = store.create_version(
-                conn,
-                type="human",
-                git_branch=branch,
-                parent_id=head_id,
-                tree_before=tree_before,
-                tree_after=tree_after,
-                diff_ref=diff_ref,
-            )
-        store.write_head(self.repo_root, branch, version.id)
+        human_edits.reconcile(self.repo_root)
 
     def _within_window(self) -> bool:
         if self._last_close_monotonic is None:

@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 import json
-import os
 import re
-import stat
 import sys
 from pathlib import Path
 
 import typer
 
+from . import checkout as checkout_service
+from . import doctor as doctor_service
 from . import git_ops, log_view, store, testrunner
 
 app = typer.Typer(help="Prompt-native version control for AI-assisted development.")
@@ -87,7 +87,9 @@ def start(
         code = session.run_claude(repo_root, port=port)
         raise typer.Exit(code)
 
-    script_rel = _install_cursor_hooks(repo_root)
+    from .adapters import cursor_hooks
+
+    script_rel = cursor_hooks.install(repo_root)
     typer.echo("profact capture is wired into Cursor for this repository.")
     typer.echo(f"  hooks config: {repo_root / '.cursor' / 'hooks.json'}")
     typer.echo(f"  hook runner:  {repo_root / script_rel}")
@@ -134,18 +136,6 @@ def hook() -> None:
         roots = event.get("workspace_roots") or []
         start_dir = Path(roots[0]) if roots else Path.cwd()
         repo_root = git_ops.repo_root(start_dir)
-        # Probe: set PROFACT_HOOK_DEBUG=1 to record every raw hook payload to
-        # .profact/hook-events.log. Use it to confirm exactly what your Cursor
-        # version delivers (e.g. the afterAgentThought shape) without affecting
-        # capture. Best-effort and never fatal.
-        if os.environ.get("PROFACT_HOOK_DEBUG"):
-            try:
-                log_path = store.profact_dir(repo_root) / "hook-events.log"
-                log_path.parent.mkdir(parents=True, exist_ok=True)
-                with log_path.open("a", encoding="utf-8") as fh:
-                    fh.write(json.dumps(event) + "\n")
-            except Exception:
-                pass
         response = cursor_hooks.handle(repo_root, event)
     except Exception:
         response = {}
@@ -190,98 +180,47 @@ def log(
     """List and filter branch-scoped versions, newest first."""
     repo_root = _resolve_repo_root()
     _require_init(repo_root)
-    current_branch = git_ops.current_branch(repo_root)
-    branch = branch_filter or current_branch
-    head = store.read_head(repo_root, branch, seed=False)
-
-    type_filter = type_filter.lower() if type_filter else None
-    if type_filter and type_filter not in store.VERSION_TYPES:
-        typer.echo(
-            f"error: unknown version type '{type_filter}'; "
-            f"choose from {', '.join(store.VERSION_TYPES)}",
-            err=True,
-        )
-        raise typer.Exit(2)
-    normalized_test_status = log_view.normalize_test_filter(test_status)
-    if test_status and normalized_test_status is None:
-        typer.echo(
-            f"error: unknown test status '{test_status}'; "
-            "choose pass, fail, error, or untested",
-            err=True,
-        )
-        raise typer.Exit(2)
     try:
-        since_cutoff = log_view.parse_since(since) if since else None
-        normalized_file = (
-            log_view.normalize_path(repo_root, file_filter) if file_filter else None
+        prepared = log_view.prepare_query(
+            repo_root,
+            path_mode=path,
+            show_tests=tests,
+            tag=tag_filter,
+            version_type=type_filter,
+            branch_filter=branch_filter,
+            model=model_filter,
+            changed_path=file_filter,
+            since=since,
+            test_status=test_status,
         )
-    except ValueError as exc:
+    except log_view.LogQueryError as exc:
         typer.echo(f"error: {exc}", err=True)
-        raise typer.Exit(2)
-    show_tests = tests or normalized_test_status is not None
+        raise typer.Exit(exc.exit_code)
 
-    with store.connect(repo_root) as conn:
-        if path:
-            base_versions = log_view.ancestry(conn, head)
-            visible = store.list_branch_versions(conn, branch, head=head)
-            omitted = max(0, len(visible) - len(base_versions))
-        else:
-            base_versions = store.list_branch_versions(conn, branch, head=head)
-            omitted = 0
-        tests_map = store.all_test_results(conn) if show_tests else None
-        tags_map = store.tags_by_version(conn)
-        if tag_filter and store.get_tag(conn, tag_filter) is None:
-            typer.echo(f"error: no such tag '{tag_filter}'", err=True)
-            raise typer.Exit(1)
-
-    if not base_versions:
-        typer.echo(f"No versions yet on '{branch}'.")
+    if not prepared.base_versions:
+        typer.echo(f"No versions yet on '{prepared.branch}'.")
         return
-
-    base_versions = sorted(
-        base_versions, key=lambda version: version.timestamp, reverse=True
-    )
-    versions = log_view.filter_versions(
-        repo_root,
-        base_versions,
-        tags=tags_map,
-        tests=tests_map or {},
-        tag=tag_filter,
-        version_type=type_filter,
-        model=model_filter,
-        changed_path=normalized_file,
-        since_cutoff=since_cutoff,
-        test_status=normalized_test_status,
-    )
-    filtered_out = len(base_versions) - len(versions)
-    filter_description = log_view.filter_description(
-        branch_filter=branch_filter,
-        tag=tag_filter,
-        version_type=type_filter,
-        model=model_filter,
-        changed_path=normalized_file,
-        since=since,
-        test_status=normalized_test_status,
-    )
-    if not versions:
-        if filter_description:
-            typer.echo(f"filters: {' · '.join(filter_description)}\n")
-        typer.echo(f"No versions match the requested filters on '{branch}'.")
+    if not prepared.versions:
+        if prepared.filters:
+            typer.echo(f"filters: {' · '.join(prepared.filters)}\n")
+        typer.echo(
+            f"No versions match the requested filters on '{prepared.branch}'."
+        )
         return
 
     log_view.render(
         repo_root,
-        versions,
-        shape_versions=base_versions,
-        head=head,
-        branch=branch,
-        tests=tests_map if show_tests else None,
-        tags=tags_map,
+        prepared.versions,
+        shape_versions=prepared.base_versions,
+        head=prepared.head,
+        branch=prepared.branch,
+        tests=prepared.tests,
+        tags=prepared.tags,
         graph=graph,
         path_mode=path,
-        omitted=omitted,
-        filtered_out=filtered_out,
-        filters=filter_description,
+        omitted=prepared.omitted,
+        filtered_out=prepared.filtered_out,
+        filters=prepared.filters,
     )
 
 
@@ -755,64 +694,22 @@ def checkout(
     """Restore the working directory to a version (auto-checkpoints first; §8)."""
     repo_root = _resolve_repo_root()
     _require_init(repo_root)
-    branch = git_ops.current_branch(repo_root)
+    try:
+        result = checkout_service.checkout(
+            repo_root,
+            version_id,
+            force=force,
+            confirm=lambda prompt: typer.confirm(prompt, default=False),
+            notify=typer.echo,
+        )
+    except checkout_service.CheckoutError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(1)
 
-    with store.connect(repo_root) as conn:
-        resolved_id = _resolve_version_token(repo_root, conn, branch, version_id)
-        target = store.get_version(conn, resolved_id) if resolved_id else None
-        if target is None:
-            typer.echo(f"error: no such version or tag '{version_id}'", err=True)
-            raise typer.Exit(1)
-        if target.tree_after is None:
-            typer.echo(
-                f"error: '{version_id}' has no finalized snapshot to restore", err=True
-            )
-            raise typer.Exit(1)
-
-        head_id = store.read_head(repo_root, branch)
-
-        # A version is part of this branch's history if it was created here or is
-        # reachable as a carried-over ancestor (of the branch or of HEAD). If not,
-        # it lives on another branch's line — offer to bring it over rather than
-        # hard-refusing, so the user stays in control.
-        reachable = {v.id for v in store.list_branch_versions(conn, branch, head=head_id)}
-        if target.id not in reachable:
-            typer.echo(
-                f"note: '{version_id}' is not part of branch '{branch}' history "
-                f"(it was created on '{target.git_branch}' and isn't an ancestor "
-                f"of this branch)."
-            )
-            if not force and not typer.confirm(
-                f"Check it out into '{branch}' anyway?", default=False
-            ):
-                typer.echo("aborted; no changes made")
-                raise typer.Exit(1)
-
-        head_version = store.get_version(conn, head_id) if head_id else None
-        current_tree = git_ops.write_tree(repo_root)
-
-        if head_version is not None:
-            head_tree = head_version.tree_after or head_version.tree_before
-            if current_tree != head_tree:
-                diff = git_ops.diff_trees(repo_root, head_tree, current_tree)
-                diff_ref = store.write_object(repo_root, diff) if diff.strip() else None
-                checkpoint = store.create_version(
-                    conn,
-                    type="checkpoint",
-                    git_branch=branch,
-                    parent_id=head_id,
-                    tree_before=head_tree,
-                    tree_after=current_tree,
-                    diff_ref=diff_ref,
-                )
-                typer.echo(
-                    f"saved uncommitted work as checkpoint {checkpoint.id} "
-                    f"(restore it with `profact checkout {checkpoint.id}`)"
-                )
-
-    git_ops.checkout_tree(repo_root, target.tree_after, prev_tree=current_tree)
-    store.write_head(repo_root, branch, target.id)
-    typer.echo(f"HEAD is now {target.id} [{target.type}]")
+    if result.aborted:
+        typer.echo("aborted; no changes made")
+        raise typer.Exit(1)
+    typer.echo(f"HEAD is now {result.target.id} [{result.target.type}]")
 
 
 @app.command()
@@ -863,150 +760,39 @@ def doctor(
     repo_root = _resolve_repo_root()
     _require_init(repo_root)
 
-    with store.connect(repo_root) as conn:
-        versions = store.all_versions(conn)
-        phantom = [v for v in versions if _is_phantom_checkpoint(repo_root, v)]
-        dangling = [
-            v for v in versions if v.type == "prompt" and v.tree_after is None
-        ]
-        dangling_tag_rows = store.dangling_tags(conn)
-        referenced = store.referenced_object_ids(conn)
-    orphans = _orphan_objects(repo_root, referenced)
+    report = doctor_service.audit(repo_root)
 
-    typer.echo(f"phantom checkpoints:   {len(phantom)}")
-    for v in phantom:
-        typer.echo(f"  {v.id}  (parent {v.parent_id or '-'})")
-    typer.echo(f"dangling open turns:   {len(dangling)}")
-    for v in dangling:
-        typer.echo(f"  {v.id}  {log_view.summary(repo_root, v)}")
-    typer.echo(f"orphaned objects:      {len(orphans)}")
-    typer.echo(f"dangling tags:         {len(dangling_tag_rows)}")
-    for item in dangling_tag_rows:
+    typer.echo(f"phantom checkpoints:   {len(report.phantom_checkpoints)}")
+    for version in report.phantom_checkpoints:
+        typer.echo(f"  {version.id}  (parent {version.parent_id or '-'})")
+    typer.echo(f"dangling open turns:   {len(report.dangling_open_turns)}")
+    for version in report.dangling_open_turns:
+        typer.echo(f"  {version.id}  {log_view.summary(repo_root, version)}")
+    typer.echo(f"orphaned objects:      {len(report.orphaned_objects)}")
+    typer.echo(f"dangling tags:         {len(report.dangling_tags)}")
+    for item in report.dangling_tags:
         typer.echo(f"  {item.name} -> {item.version_id}")
 
     if not fix:
-        if phantom or orphans or dangling_tag_rows:
+        if report.has_safe_repairs:
             typer.echo("\nrun `profact doctor --fix` to prune the safe-to-remove items above")
         else:
             typer.echo("\nnothing to repair.")
         return
 
-    removed_versions = 0
-    with store.connect(repo_root) as conn:
-        for v in phantom:
-            # Rewire any children onto the phantom's parent so no chain breaks,
-            # move any branch HEAD and tags off it, then delete the row.
-            store.reparent_children(conn, v.id, v.parent_id)
-            for br in store.heads_pointing_to(conn, v.id):
-                if v.parent_id:
-                    store.write_head(repo_root, br, v.parent_id)
-            store.retarget_tags(conn, v.id, v.parent_id)
-            store.delete_version(conn, v.id)
-            removed_versions += 1
-        removed_tags = 0
-        for item in store.dangling_tags(conn):
-            if store.delete_tag(conn, item.name):
-                removed_tags += 1
-        referenced = store.referenced_object_ids(conn)
-
-    # If the repo-wide pointer still names a deleted version, repoint it.
-    global_head = store._read_global_head(repo_root)
-    if global_head:
-        with store.connect(repo_root) as conn:
-            if store.get_version(conn, global_head) is None:
-                store._write_global_head(repo_root, "")
-
-    removed_objects = 0
-    for path in _orphan_objects(repo_root, referenced):
-        path.unlink()
-        removed_objects += 1
+    result = doctor_service.repair(repo_root, report)
 
     typer.echo(
-        f"\nremoved {removed_versions} phantom checkpoint(s) and "
-        f"{removed_objects} orphaned object(s), and {removed_tags} dangling tag(s)."
+        f"\nremoved {result.removed_versions} phantom checkpoint(s) and "
+        f"{result.removed_objects} orphaned object(s), and "
+        f"{result.removed_tags} dangling tag(s)."
     )
-    if dangling:
+    if report.dangling_open_turns:
         typer.echo(
-            f"left {len(dangling)} dangling open turn(s) untouched (real work; "
+            f"left {len(report.dangling_open_turns)} dangling open turn(s) "
+            "untouched (real work; "
             "they finalize on the next prompt)."
         )
-
-
-def _is_phantom_checkpoint(repo_root: Path, version: store.Version) -> bool:
-    """A checkpoint that recorded no real work — empty, or touching only profact's
-    own infrastructure (an artifact of the pre-fix snapshot bug)."""
-    if version.type != "checkpoint":
-        return False
-    diff = store.read_object(repo_root, version.diff_ref) if version.diff_ref else ""
-    paths = log_view.diff_paths(diff or "")
-    return all(git_ops.is_infra_path(p) for p in paths)
-
-
-def _orphan_objects(repo_root: Path, referenced: set[str]) -> list[Path]:
-    objects_dir = store.objects_dir(repo_root)
-    if not objects_dir.exists():
-        return []
-    return [
-        p for p in objects_dir.iterdir() if p.is_file() and p.name not in referenced
-    ]
-
-
-def _install_cursor_hooks(repo_root: Path) -> str:
-    """Write the hook runner script and merge profact entries into .cursor/hooks.json.
-
-    Returns the project-relative path of the runner script. Existing, unrelated
-    hooks are preserved; profact entries are added idempotently.
-    """
-    from .adapters import cursor_hooks
-
-    cursor_dir = repo_root / ".cursor"
-    hooks_dir = cursor_dir / "hooks"
-    hooks_dir.mkdir(parents=True, exist_ok=True)
-
-    # The hook files are machine-specific (interpreter path + PYTHONPATH) and are
-    # profact's own capture machinery, so keep them out of the versioned tree.
-    # Otherwise `checkout` to a version created before `start` would delete them
-    # and silently disable capture.
-    _ensure_gitignore(repo_root, ".cursor/hooks.json", ".cursor/hooks/")
-
-    script_rel = ".cursor/hooks/profact-hook.sh"
-    script_path = repo_root / script_rel
-    pkg_parent = Path(__file__).resolve().parent.parent
-    script = (
-        "#!/usr/bin/env bash\n"
-        "# Auto-generated by `profact start`. Forwards Cursor hook events to profact.\n"
-        f'export PYTHONPATH="{pkg_parent}:$PYTHONPATH"\n'
-        f'exec "{sys.executable}" -m profact.cli hook\n'
-    )
-    script_path.write_text(script)
-    script_path.chmod(script_path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-
-    config_path = cursor_dir / "hooks.json"
-    config: dict = {"version": 1, "hooks": {}}
-    if config_path.exists():
-        try:
-            loaded = json.loads(config_path.read_text())
-            if isinstance(loaded, dict):
-                config = loaded
-        except json.JSONDecodeError:
-            pass
-    config.setdefault("version", 1)
-    hooks = config.setdefault("hooks", {})
-    if not isinstance(hooks, dict):
-        hooks = config["hooks"] = {}
-
-    for event in cursor_hooks.HANDLED_EVENTS:
-        entries = hooks.setdefault(event, [])
-        if not isinstance(entries, list):
-            entries = hooks[event] = []
-        already = any(
-            isinstance(e, dict) and e.get("command") == script_rel for e in entries
-        )
-        if not already:
-            entries.append({"command": script_rel})
-
-    config_path.write_text(json.dumps(config, indent=2) + "\n")
-    return script_rel
 
 
 def _require_init(repo_root: Path) -> None:
