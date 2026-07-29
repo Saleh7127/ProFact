@@ -9,6 +9,7 @@ import typer
 
 from . import checkout as checkout_service
 from . import doctor as doctor_service
+from . import health as health_service
 from . import git_ops, human_edits, log_view, store, testrunner
 
 app = typer.Typer(help="Prompt-native version control for AI-assisted development.")
@@ -225,10 +226,25 @@ def log(
 
 
 @app.command()
-def show(version_id: str) -> None:
-    """Show the prompt, response, and diff for a single version."""
+def show(
+    version_id: str,
+    section: str = typer.Argument(
+        None,
+        help="Show only one section: prompt, thinking, response, or diff.",
+    ),
+) -> None:
+    """Show a version, or only one of its captured content sections."""
     repo_root = _resolve_repo_root()
     _require_init(repo_root)
+    if section is not None:
+        section = section.casefold()
+        if section not in {"prompt", "thinking", "response", "diff"}:
+            typer.echo(
+                f"error: unknown show section '{section}'; "
+                "choose prompt, thinking, response, or diff",
+                err=True,
+            )
+            raise typer.Exit(2)
     branch = git_ops.current_branch(repo_root)
     with store.connect(repo_root) as conn:
         resolved_id = _resolve_version_token(repo_root, conn, branch, version_id)
@@ -238,6 +254,10 @@ def show(version_id: str) -> None:
     if version is None:
         typer.echo(f"error: no such version or tag '{version_id}'", err=True)
         raise typer.Exit(1)
+
+    if section is not None:
+        _echo_show_section(repo_root, version, section)
+        return
 
     head = store.read_head(repo_root, branch, seed=False)
     is_head = " (HEAD)" if version.id == head else ""
@@ -767,6 +787,14 @@ def status() -> None:
 
 
 @app.command()
+def health() -> None:
+    """Summarize activity, tests, churn, and attention in captured history."""
+    repo_root = _resolve_repo_root()
+    _require_init(repo_root)
+    typer.echo(health_service.render(health_service.analyze(repo_root)))
+
+
+@app.command()
 def doctor(
     fix: bool = typer.Option(
         False, "--fix", help="Apply safe repairs (prune artifacts). Default is report-only."
@@ -864,6 +892,45 @@ def _echo_thinking(repo_root: Path, version: store.Version) -> None:
     elif version.thinking_source == store.THINKING_NONE:
         typer.echo("\nthinking:")
         typer.echo(_indent(_NO_THINKING_PLACEHOLDER))
+
+
+def _echo_show_section(
+    repo_root: Path, version: store.Version, section: str
+) -> None:
+    """Print one captured section without report headings or metadata."""
+    if section == "prompt":
+        value = (
+            store.read_object(repo_root, version.prompt_ref)
+            if version.prompt_ref
+            else None
+        )
+        typer.echo(value if value else "(no prompt recorded)")
+    elif section == "thinking":
+        value = (
+            store.read_object(repo_root, version.thinking_ref)
+            if version.thinking_ref
+            else None
+        )
+        if value:
+            typer.echo(value)
+        elif version.thinking_source == store.THINKING_NONE:
+            typer.echo(_NO_THINKING_PLACEHOLDER)
+        else:
+            typer.echo("(no reasoning recorded)")
+    elif section == "response":
+        value = (
+            store.read_object(repo_root, version.response_ref)
+            if version.response_ref
+            else None
+        )
+        typer.echo(value if value else "(no response recorded)")
+    else:
+        value = (
+            store.read_object(repo_root, version.diff_ref)
+            if version.diff_ref
+            else None
+        )
+        typer.echo(value if value else "(no file changes)")
 
 
 def _short(text: str, length: int = 72) -> str:

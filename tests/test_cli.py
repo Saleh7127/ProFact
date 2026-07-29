@@ -88,6 +88,33 @@ def test_show_renders_prompt_response_and_diff(git_repo: Path, monkeypatch) -> N
     assert "greet.py" in result.output  # diff mentions the new file
 
 
+def test_show_renders_only_the_requested_section(git_repo: Path, monkeypatch) -> None:
+    monkeypatch.chdir(git_repo)
+    version = _make_prompt(
+        git_repo,
+        prompt="add a greeting",
+        mutate=lambda: (git_repo / "greet.py").write_text("print('hi')\n"),
+    )
+
+    prompt = runner.invoke(app, ["show", version.id, "prompt"])
+    assert prompt.exit_code == 0, prompt.output
+    assert prompt.output.strip() == "add a greeting"
+
+    diff = runner.invoke(app, ["show", version.id, "diff"])
+    assert diff.exit_code == 0, diff.output
+    assert "greet.py" in diff.output
+    assert "add a greeting" not in diff.output
+    assert "version v" not in diff.output
+
+
+def test_show_rejects_unknown_section(git_repo: Path, monkeypatch) -> None:
+    monkeypatch.chdir(git_repo)
+
+    result = runner.invoke(app, ["show", "v1", "unknown"])
+    assert result.exit_code == 2
+    assert "choose prompt, thinking, response, or diff" in result.output
+
+
 def test_diff_between_two_versions(git_repo: Path, monkeypatch) -> None:
     monkeypatch.chdir(git_repo)
     _make_prompt(git_repo, prompt="add x", mutate=lambda: (git_repo / "x.py").write_text("x=1\n"))

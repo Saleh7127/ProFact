@@ -37,6 +37,7 @@ profact start --claude    # or capture Claude Code via a local proxy
 | `profact checkout <id>` | Restore the working tree to a version |
 | `profact note <commit>` | Annotate a Git commit with its version |
 | `profact status` | Show capture and HEAD status |
+| `profact health` | Summarize captured activity, tests, churn, and history attention |
 | `profact doctor` | Check (and `--fix`) the profact store |
 
 ## Testing

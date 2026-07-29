@@ -432,6 +432,14 @@ def all_versions(conn: sqlite3.Connection) -> list[Version]:
     return [_row_to_version(row) for row in rows]
 
 
+def all_heads(conn: sqlite3.Connection) -> dict[str, str | None]:
+    """Map every captured Git branch to its current profact HEAD."""
+    return {
+        row["git_branch"]: row["version_id"]
+        for row in conn.execute("SELECT git_branch, version_id FROM heads")
+    }
+
+
 def set_tag(
     conn: sqlite3.Connection,
     name: str,
