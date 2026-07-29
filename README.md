@@ -18,6 +18,7 @@ cd your-repo
 profact init              # set up profact in the current Git repo
 profact start             # capture Cursor via hooks (default)
 profact start --claude    # or capture Claude Code via a local proxy
+profact tui               # browse the captured history interactively
 ```
 
 ## Commands
@@ -38,7 +39,19 @@ profact start --claude    # or capture Claude Code via a local proxy
 | `profact note <commit>` | Annotate a Git commit with its version |
 | `profact status` | Show capture and HEAD status |
 | `profact health` | Summarize captured activity, tests, churn, and history attention |
+| `profact tui` | Browse captured history in an interactive terminal UI |
 | `profact doctor` | Check (and `--fix`) the profact store |
+
+## Interactive history
+
+`profact tui` opens a read-only history browser with a navigable DAG and tabs
+for overview, prompt, reasoning, response, diff, and recorded tests. Use `/` to
+search, `f` for the existing log filters, `b` to inspect another captured
+branch without switching Git branches, `p` for HEAD ancestry, `h` for health,
+and `?` for the complete keyboard reference.
+
+Selecting a version does not move ProFact HEAD or change files. Checkout and
+tag mutation remain CLI operations while their guarded TUI workflows are built.
 
 ## Testing
 
@@ -46,7 +59,9 @@ profact start --claude    # or capture Claude Code via a local proxy
 pytest
 ```
 
-See [TESTING.md](TESTING.md) for details, [profact_spec.md](profact_spec.md) for the full design, and [profact_roadmap.md](profact_roadmap.md) for planned work.
+See [TESTING.md](TESTING.md) for details, [profact_spec.md](profact_spec.md) for
+the full design, [profact_tui_spec.md](profact_tui_spec.md) for the terminal UI
+contract, and [profact_roadmap.md](profact_roadmap.md) for planned work.
 
 ## License
 

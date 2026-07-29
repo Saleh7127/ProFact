@@ -11,6 +11,7 @@ DB_NAME = "history.db"
 HEAD_NAME = "HEAD"
 OBJECTS_DIR = "objects"
 TMP_INDEX = "tmp_index"
+SQLITE_BUSY_TIMEOUT_MS = 5_000
 
 VERSION_TYPES = ("prompt", "anchor", "checkpoint", "human")
 
@@ -156,8 +157,12 @@ def init_db(repo_root: Path) -> None:
 
 def connect(repo_root: Path) -> sqlite3.Connection:
     profact_dir(repo_root).mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(db_path(repo_root))
+    conn = sqlite3.connect(
+        db_path(repo_root), timeout=SQLITE_BUSY_TIMEOUT_MS / 1_000
+    )
     conn.row_factory = sqlite3.Row
+    conn.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
+    conn.execute("PRAGMA journal_mode = WAL")
     _migrate(conn)
     return conn
 

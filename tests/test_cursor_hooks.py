@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 from typer.testing import CliRunner
@@ -198,7 +199,8 @@ def test_start_installs_hooks_config(git_repo: Path, monkeypatch) -> None:
 
     script = git_repo / ".cursor" / "hooks" / "profact-hook.sh"
     assert script.exists()
-    assert script.stat().st_mode & 0o111  # executable
+    if os.name != "nt":
+        assert script.stat().st_mode & 0o111  # POSIX executable bit
 
     config = json.loads((git_repo / ".cursor" / "hooks.json").read_text())
     assert config["version"] == 1

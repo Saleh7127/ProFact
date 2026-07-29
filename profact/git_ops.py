@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import tempfile
 from pathlib import Path
 
 
@@ -56,7 +57,7 @@ def head_commit(repo_root: Path) -> str | None:
 
 
 def write_tree(repo_root: Path, index_file: Path | None = None) -> str:
-    index_file = index_file or repo_root / ".profact" / "tmp_index"
+    index_file = index_file or _temporary_index_path(repo_root)
     index_file.parent.mkdir(parents=True, exist_ok=True)
     env = {**os.environ, "GIT_INDEX_FILE": str(index_file)}
     try:
@@ -175,7 +176,7 @@ def checkout_tree(
     ``tree`` are deleted (spec §8). Only files inside the tracked-domain trees
     are touched; ``.gitignore``-d files (e.g. ``.env``) are left alone.
     """
-    index_file = index_file or repo_root / ".profact" / "tmp_index"
+    index_file = index_file or _temporary_index_path(repo_root)
     index_file.parent.mkdir(parents=True, exist_ok=True)
     env = {**os.environ, "GIT_INDEX_FILE": str(index_file)}
     try:
@@ -206,6 +207,17 @@ def _prune_empty_dirs(start: Path, repo_root: Path) -> None:
         except StopIteration:
             current.rmdir()
             current = current.parent
+
+
+def _temporary_index_path(repo_root: Path) -> Path:
+    """Return a unique, absent path suitable for ``GIT_INDEX_FILE``."""
+    directory = repo_root / ".profact"
+    directory.mkdir(parents=True, exist_ok=True)
+    descriptor, name = tempfile.mkstemp(prefix="tmp_index_", dir=directory)
+    os.close(descriptor)
+    path = Path(name)
+    path.unlink()
+    return path
 
 
 def add_note(repo_root: Path, commit: str, payload: str) -> None:

@@ -305,23 +305,31 @@ deliberately deferred.
   test status.
 - [x] CLI responsibility cleanup: checkout, doctor, Cursor setup, and log query
   preparation live outside `cli.py`.
+- [x] `profact health` repository-history summary with activity, test, churn,
+  topology, and attention findings.
 
-### Next milestone — make existing history immediately useful
+### Completed milestone — make existing history immediately useful
 
-- [ ] Implement `profact health`, initially as a CLI report.
+- [x] Implement `profact health`, initially as a CLI report.
   - Summarize prompt, human-edit, checkpoint, and branch counts.
   - Summarize passed, failed, errored, and untested versions.
   - Identify high-churn files and repeatedly rewritten areas.
   - Surface uncertain attribution, dangling turns, and abandoned side paths.
   - Highlight versions worth inspecting with `show`, `blame`, or `bisect`.
   - Keep calculations inspectable; do not emit an unexplained quality score.
-- [ ] Add focused tests for every health metric and empty/partial-history cases.
+- [x] Add focused tests for health metrics and empty/partial-history cases.
 - [ ] Document a reproducible demo session that produces meaningful health
-  output.
+  output alongside the TUI demo.
 
-### Then — make history visible
+### Current milestone — make history visible
 
 - [ ] Build an interactive TUI over the existing read-only APIs.
+  - [x] Harden SQLite and Git shadow-index concurrency for a long-lived reader.
+  - [x] Add reusable version-detail, graph-layout, status, and presenter models.
+  - [x] Add the read-only Textual browser, responsive detail tabs, search,
+    filters, branch viewing, ancestry mode, health, help, and manual refresh.
+  - [ ] Add guarded checkout and repository-wide tag actions after read-only
+    interaction stability is established.
   - DAG and branch navigation.
   - Prompt, reasoning, response, and diff panes.
   - Tag, test, confidence, and health indicators.
@@ -331,6 +339,9 @@ deliberately deferred.
   analyses.
 - [ ] Consider a local web dashboard and editor panel only after the TUI proves
   the information architecture.
+
+The implementation contract, visual semantics, safety boundaries, and testing
+gates for this milestone live in `profact_tui_spec.md`.
 
 ### Trust and robustness work
 

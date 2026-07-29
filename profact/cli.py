@@ -10,7 +10,15 @@ import typer
 from . import checkout as checkout_service
 from . import doctor as doctor_service
 from . import health as health_service
-from . import git_ops, human_edits, log_view, store, testrunner
+from . import (
+    git_ops,
+    human_edits,
+    log_view,
+    status_view,
+    store,
+    testrunner,
+    version_detail,
+)
 
 app = typer.Typer(help="Prompt-native version control for AI-assisted development.")
 
@@ -255,12 +263,19 @@ def show(
         typer.echo(f"error: no such version or tag '{version_id}'", err=True)
         raise typer.Exit(1)
 
+    head = store.read_head(repo_root, branch, seed=False)
+    detail = version_detail.load(
+        repo_root,
+        version,
+        head_id=head,
+        tags=tuple(tags),
+        test_result=test_result,
+    )
     if section is not None:
-        _echo_show_section(repo_root, version, section)
+        typer.echo(detail.section(section))
         return
 
-    head = store.read_head(repo_root, branch, seed=False)
-    is_head = " (HEAD)" if version.id == head else ""
+    is_head = " (HEAD)" if detail.is_head else ""
     typer.echo(f"version {version.id}{is_head}  [{version.type}]")
     typer.echo(f"  branch:   {version.git_branch}")
     typer.echo(f"  parent:   {version.parent_id or '-'}")
@@ -270,32 +285,34 @@ def show(
         typer.echo(f"  model:    {version.model}{temp}")
     if version.commit_hash:
         typer.echo(f"  commit:   {version.commit_hash[:8]}")
-    if tags:
-        typer.echo(f"  tags:     {', '.join(tags)}")
-    if test_result:
-        typer.echo(f"  test:     {testrunner.format_result(test_result)}")
+    if detail.tags:
+        typer.echo(f"  tags:     {', '.join(detail.tags)}")
+    if detail.test_result:
+        typer.echo(f"  test:     {testrunner.format_result(detail.test_result)}")
     if version.confidence and version.confidence != "high":
         typer.echo(
             f"  warning:  confidence is '{version.confidence}' — "
             "files changed concurrently with this turn; attribution may be imprecise"
         )
 
-    prompt = store.read_object(repo_root, version.prompt_ref) if version.prompt_ref else None
-    if prompt:
+    if detail.prompt:
         typer.echo("\nprompt:")
-        typer.echo(_indent(prompt))
+        typer.echo(_indent(detail.prompt))
 
-    _echo_thinking(repo_root, version)
+    if detail.thinking:
+        typer.echo("\nthinking:")
+        typer.echo(_indent(detail.thinking))
+    elif version.thinking_source == store.THINKING_NONE:
+        typer.echo("\nthinking:")
+        typer.echo(_indent(version_detail.NO_THINKING_PLACEHOLDER))
 
-    response = store.read_object(repo_root, version.response_ref) if version.response_ref else None
-    if response:
+    if detail.response:
         typer.echo("\nresponse:")
-        typer.echo(_indent(response))
+        typer.echo(_indent(detail.response))
 
-    diff = store.read_object(repo_root, version.diff_ref) if version.diff_ref else None
     typer.echo("\ndiff:")
-    if diff:
-        typer.echo(diff)
+    if detail.diff:
+        typer.echo(detail.diff)
     else:
         typer.echo("  (no file changes)")
 
@@ -754,36 +771,29 @@ def status() -> None:
     """Show current HEAD, branch, and whether the working tree is dirty."""
     repo_root = _resolve_repo_root()
     _require_init(repo_root)
-    branch = git_ops.current_branch(repo_root)
-    head_id = store.read_head(repo_root, branch, seed=False)
+    report = status_view.inspect(repo_root)
 
-    typer.echo(f"branch:  {branch}")
-    if head_id is None:
+    typer.echo(f"branch:  {report.branch}")
+    if report.head_id is None:
         typer.echo("HEAD:    (none yet)")
         return
 
-    with store.connect(repo_root) as conn:
-        head = store.get_version(conn, head_id)
-        count = len(store.list_branch_versions(conn, branch, head=head_id))
-        test_result = store.get_test_result(conn, head_id)
-
-    if head is None:
-        typer.echo(f"HEAD:    {head_id} (missing from store)")
+    if report.head is None:
+        typer.echo(f"HEAD:    {report.head_id} (missing from store)")
         return
 
     typer.echo(
-        f"HEAD:    {head.id} [{head.type}] {log_view.summary(repo_root, head)}"
+        f"HEAD:    {report.head.id} [{report.head.type}] "
+        f"{log_view.summary(repo_root, report.head)}"
     )
-    typer.echo(f"versions on branch: {count}")
-    if test_result:
-        typer.echo(f"tests:   {testrunner.format_result(test_result)}")
+    typer.echo(f"versions on branch: {report.visible_versions}")
+    if report.test_result:
+        typer.echo(f"tests:   {testrunner.format_result(report.test_result)}")
 
-    head_tree = head.tree_after or head.tree_before
-    current_tree = git_ops.write_tree(repo_root)
-    if current_tree == head_tree:
-        typer.echo("working tree: clean (matches HEAD)")
-    else:
+    if report.dirty:
         typer.echo("working tree: dirty (differs from HEAD — uncommitted changes present)")
+    else:
+        typer.echo("working tree: clean (matches HEAD)")
 
 
 @app.command()
@@ -792,6 +802,16 @@ def health() -> None:
     repo_root = _resolve_repo_root()
     _require_init(repo_root)
     typer.echo(health_service.render(health_service.analyze(repo_root)))
+
+
+@app.command()
+def tui() -> None:
+    """Browse captured history in the interactive terminal UI."""
+    repo_root = _resolve_repo_root()
+    _require_init(repo_root)
+    from .tui.app import run
+
+    run(repo_root)
 
 
 @app.command()
@@ -867,70 +887,6 @@ def _tag_name_error(name: str) -> str | None:
 
 def _indent(text: str, prefix: str = "  ") -> str:
     return "\n".join(prefix + line for line in text.splitlines())
-
-
-_NO_THINKING_PLACEHOLDER = (
-    "(no reasoning captured — the model has no thinking capability, "
-    "or none was emitted for this turn)"
-)
-
-
-def _echo_thinking(repo_root: Path, version: store.Version) -> None:
-    """Print the model's reasoning for a version, or an explicit placeholder.
-
-    Only prompt turns carry reasoning; anchors/checkpoints/human edits have no
-    ``thinking_source`` and are skipped silently.
-    """
-    thinking = (
-        store.read_object(repo_root, version.thinking_ref)
-        if version.thinking_ref
-        else None
-    )
-    if thinking:
-        typer.echo("\nthinking:")
-        typer.echo(_indent(thinking))
-    elif version.thinking_source == store.THINKING_NONE:
-        typer.echo("\nthinking:")
-        typer.echo(_indent(_NO_THINKING_PLACEHOLDER))
-
-
-def _echo_show_section(
-    repo_root: Path, version: store.Version, section: str
-) -> None:
-    """Print one captured section without report headings or metadata."""
-    if section == "prompt":
-        value = (
-            store.read_object(repo_root, version.prompt_ref)
-            if version.prompt_ref
-            else None
-        )
-        typer.echo(value if value else "(no prompt recorded)")
-    elif section == "thinking":
-        value = (
-            store.read_object(repo_root, version.thinking_ref)
-            if version.thinking_ref
-            else None
-        )
-        if value:
-            typer.echo(value)
-        elif version.thinking_source == store.THINKING_NONE:
-            typer.echo(_NO_THINKING_PLACEHOLDER)
-        else:
-            typer.echo("(no reasoning recorded)")
-    elif section == "response":
-        value = (
-            store.read_object(repo_root, version.response_ref)
-            if version.response_ref
-            else None
-        )
-        typer.echo(value if value else "(no response recorded)")
-    else:
-        value = (
-            store.read_object(repo_root, version.diff_ref)
-            if version.diff_ref
-            else None
-        )
-        typer.echo(value if value else "(no file changes)")
 
 
 def _short(text: str, length: int = 72) -> str:

@@ -4,7 +4,7 @@
 **(prompt, artifact) pair**. This guide shows how to run it end to end on your
 machine and lists the current limitations.
 
-All commands assume you are at the repo root: `/Users/saleh/Downloads/V2C2`.
+All commands assume you are at the checked-out ProFact repository root.
 
 ---
 
@@ -17,7 +17,7 @@ pip install -e ".[dev]"
 ```
 
 This puts a `profact` command on your PATH (`pyproject.toml [project.scripts]`)
-and installs the dev dependency (`pytest`).
+and installs pytest, async UI test support, and the Textual TUI runtime.
 
 > If you prefer not to install, you can run the CLI as a module from the repo
 > root: `PYTHONPATH=. python -m profact.cli <command>`.
@@ -30,7 +30,7 @@ and installs the dev dependency (`pytest`).
 pytest -q
 ```
 
-Expected: **93 passed**. Coverage by area:
+Expected: all tests pass. Coverage by area:
 
 | File | What it proves |
 |------|----------------|
@@ -46,6 +46,13 @@ Expected: **93 passed**. Coverage by area:
 | `test_testrunner.py` | record pass/fail/error per version, display in show/status/log, doctor keeps output |
 | `test_tags.py` | create/list/delete/move tags, tag refs, cross-branch guard, doctor repair |
 | `test_log_filters.py` | tag/type/branch/model/file/time/test filters, composition, compatibility |
+| `test_health.py` | activity, tests, churn, topology, attention, and empty history |
+| `test_concurrency.py` | WAL reader/writer coexistence and independent shadow indexes |
+| `test_graph_layout.py` | reusable DAG lane and topology layout |
+| `test_version_detail.py` | shared prompt/reasoning/response/diff/test content model |
+| `test_status_view.py` | shared branch/HEAD/dirty/open-turn status model |
+| `test_tui_presenter.py` | framework-free history, search, detail, and health screen models |
+| `test_tui_app.py` | Textual Pilot navigation, responsive layout, branch viewing, filters, and help |
 
 ---
 
@@ -83,7 +90,14 @@ profact log                 # v2 (prompt) on top of v1 (anchor)
 profact show v2             # prompt, response, diff
 profact checkout v1         # button.py disappears (restored to anchor)
 profact log --graph         # see the DAG + branch tips
+profact health              # inspect activity, tests, churn, and attention
+profact tui                 # browse the same history interactively
 ```
+
+Inside the TUI, press `?` for the keyboard reference. Resize below 80 columns
+to exercise the stacked history/detail layout. Viewing a different branch with
+`b` must not change `git branch --show-current`; browsing must leave `git
+status --short` and ProFact HEAD unchanged.
 
 Compare versions with `profact diff` (read-only; works across git branches):
 
