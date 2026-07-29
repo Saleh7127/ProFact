@@ -196,6 +196,68 @@ def test_status_reports_clean_then_dirty(git_repo: Path, monkeypatch) -> None:
     assert "dirty" in dirty.output
 
 
+def test_snapshot_captures_all_pending_edits_as_one_human_version(
+    git_repo: Path, monkeypatch
+) -> None:
+    monkeypatch.chdir(git_repo)
+    parent_id = store.read_head(git_repo, "main")
+    (git_repo / "a.txt").write_text("changed manually\n")
+    (git_repo / "notes.txt").write_text("also manual\n")
+
+    captured = runner.invoke(app, ["snapshot"])
+    assert captured.exit_code == 0, captured.output
+    assert "[human]" in captured.output
+
+    with store.connect(git_repo) as conn:
+        versions = store.list_versions(conn, "main")
+    human_versions = [version for version in versions if version.type == "human"]
+    assert len(human_versions) == 1
+    assert human_versions[0].parent_id == parent_id
+    assert store.read_head(git_repo, "main") == human_versions[0].id
+
+    clean = runner.invoke(app, ["snapshot"])
+    assert clean.exit_code == 0, clean.output
+    assert "No manual changes" in clean.output
+    with store.connect(git_repo) as conn:
+        assert len(store.list_versions(conn, "main")) == len(versions)
+
+
+def test_snapshot_refuses_to_split_an_open_prompt(
+    git_repo: Path, monkeypatch
+) -> None:
+    monkeypatch.chdir(git_repo)
+    parent_id = store.read_head(git_repo, "main")
+    tree = git_ops.write_tree(git_repo)
+    with store.connect(git_repo) as conn:
+        prompt = store.create_version(
+            conn,
+            type="prompt",
+            git_branch="main",
+            parent_id=parent_id,
+            tree_before=tree,
+        )
+    store.write_head(git_repo, "main", prompt.id)
+    (git_repo / "a.txt").write_text("changed during prompt\n")
+
+    result = runner.invoke(app, ["snapshot"])
+    assert result.exit_code == 1
+    assert "still open" in result.output
+    with store.connect(git_repo) as conn:
+        assert not any(
+            version.type == "human" for version in store.list_versions(conn, "main")
+        )
+
+
+def test_help_lists_snapshot_command() -> None:
+    help_result = runner.invoke(app, ["--help"])
+    assert help_result.exit_code == 0, help_result.output
+    assert "snapshot" in help_result.output
+
+    command_help = runner.invoke(app, ["snapshot", "--help"])
+    assert command_help.exit_code == 0, command_help.output
+    assert "Capture pending manual working-tree changes" in command_help.output
+
+
 def test_checkout_branching_never_loses_work(git_repo: Path, monkeypatch) -> None:
     """The core DoD: branch backward, both lines survive, checkout loses nothing."""
     monkeypatch.chdir(git_repo)

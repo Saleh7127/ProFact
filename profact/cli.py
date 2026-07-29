@@ -9,7 +9,7 @@ import typer
 
 from . import checkout as checkout_service
 from . import doctor as doctor_service
-from . import git_ops, log_view, store, testrunner
+from . import git_ops, human_edits, log_view, store, testrunner
 
 app = typer.Typer(help="Prompt-native version control for AI-assisted development.")
 
@@ -710,6 +710,23 @@ def checkout(
         typer.echo("aborted; no changes made")
         raise typer.Exit(1)
     typer.echo(f"HEAD is now {result.target.id} [{result.target.type}]")
+
+
+@app.command()
+def snapshot() -> None:
+    """Capture pending manual working-tree changes as one human version."""
+    repo_root = _resolve_repo_root()
+    _require_init(repo_root)
+    try:
+        result = human_edits.snapshot(repo_root)
+    except human_edits.SnapshotError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(1)
+
+    if result.version is None:
+        typer.echo("No manual changes to snapshot.")
+        return
+    typer.echo(f"saved manual changes as {result.version.id} [human]")
 
 
 @app.command()
