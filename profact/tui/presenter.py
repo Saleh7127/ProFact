@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from .. import graph_layout, health, log_view, store, version_detail
+from .. import graph_layout, health, log_view, recovery, store, version_detail
 
 
 @dataclass(frozen=True)
@@ -184,7 +184,15 @@ def overview_text(detail: version_detail.VersionDetail) -> str:
         )
     else:
         lines.append("Test: untested")
-    if version.confidence and version.confidence != "high":
+    if version.confidence == recovery.INCOMPLETE_CONFIDENCE:
+        lines.extend(
+            [
+                "",
+                "Warning: capture ended before its artifact was recovered;",
+                "working-tree changes were not attributed to this prompt.",
+            ]
+        )
+    elif version.confidence and version.confidence != "high":
         lines.extend(
             [
                 "",

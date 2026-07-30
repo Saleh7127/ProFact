@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from profact import git_ops, store, version_detail
+from profact import git_ops, recovery, store, version_detail
 from profact.tui import presenter
 
 
@@ -71,3 +71,19 @@ def test_presenter_preserves_no_reasoning_placeholder(git_repo: Path) -> None:
     detail = presenter.load_detail(git_repo, version.id, branch="main")
 
     assert detail.section("thinking") == version_detail.NO_THINKING_PLACEHOLDER
+
+
+def test_presenter_explains_preserved_incomplete_capture(git_repo: Path) -> None:
+    version = _prompt(git_repo, "unfinished", "value = 1\n")
+    with store.connect(git_repo) as conn:
+        conn.execute(
+            "UPDATE versions SET confidence = ? WHERE id = ?",
+            (recovery.INCOMPLETE_CONFIDENCE, version.id),
+        )
+        conn.commit()
+
+    detail = presenter.load_detail(git_repo, version.id, branch="main")
+    overview = presenter.overview_text(detail)
+
+    assert "capture ended before its artifact was recovered" in overview
+    assert "working-tree changes were not attributed" in overview

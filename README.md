@@ -40,7 +40,24 @@ profact tui               # browse the captured history interactively
 | `profact status` | Show capture and HEAD status |
 | `profact health` | Summarize captured activity, tests, churn, and history attention |
 | `profact tui` | Browse captured history in an interactive terminal UI |
+| `profact recover` | Inspect and recover prompt turns interrupted before finalization |
 | `profact doctor` | Check (and `--fix`) the profact store |
+
+## Crash recovery
+
+If Cursor, Claude, or the machine stops during a turn, inspect it explicitly:
+
+```sh
+profact recover
+profact recover v13 --finalize  # current branch HEAD: adopt the current tree
+profact recover v13 --preserve  # close incomplete; leave working files untouched
+```
+
+Recovered finalization is marked `uncertain` because post-crash edits cannot be
+distinguished reliably. Preserve keeps the prompt/response record, records no
+artifact, and lets current changes be captured separately with `profact
+snapshot`. ProFact does not delete a crashed prompt: destructive discard would
+contradict its immutable, never-lose-work history model.
 
 ## Interactive history
 

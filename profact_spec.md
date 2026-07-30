@@ -199,6 +199,7 @@ profact bisect --good <id> [--bad <id>] -- <cmd>  # binary-search the lineage fo
 profact test [--version <id>] -- <cmd>  # run a test command; record pass/fail/error on the version (HEAD by default); shown in show/status/log --tests
 profact checkout <id> [-f]      # §8 — auto-checkpoint, restore tree, move HEAD; preserves ignored files; prompts before a cross-branch target (--force skips)
 profact status                  # current HEAD id, branch, dirty-vs-HEAD, any open/in-progress version
+profact recover [<id> (--finalize|--preserve)]  # inspect/close interrupted prompt turns; never deletes captured intent
 profact doctor [--fix]          # report/prune history artifacts: phantom checkpoints, orphaned objects (dangling turns report-only)
 ```
 

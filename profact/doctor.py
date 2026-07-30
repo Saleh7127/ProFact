@@ -40,11 +40,7 @@ def audit(repo_root: Path) -> DoctorReport:
             for version in versions
             if _is_phantom_checkpoint(repo_root, version)
         ]
-        dangling = [
-            version
-            for version in versions
-            if version.type == "prompt" and version.tree_after is None
-        ]
+        dangling = store.dangling_open_turns(conn)
         dangling_tags = store.dangling_tags(conn)
         referenced = store.referenced_object_ids(conn)
 

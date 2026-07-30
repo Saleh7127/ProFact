@@ -10,6 +10,7 @@ import typer
 from . import checkout as checkout_service
 from . import doctor as doctor_service
 from . import health as health_service
+from . import recovery as recovery_service
 from . import (
     git_ops,
     human_edits,
@@ -89,6 +90,13 @@ def start(
     """Start capture. Default installs Cursor hooks; --claude runs the Claude proxy."""
     repo_root = _resolve_repo_root()
     _require_init(repo_root)
+    dangling_count = len(recovery_service.audit(repo_root))
+    if dangling_count:
+        typer.echo(
+            f"note: {dangling_count} unfinished prompt turn(s) found; "
+            "run `profact recover` if capture was interrupted",
+            err=True,
+        )
 
     if claude:
         from . import session
@@ -289,7 +297,12 @@ def show(
         typer.echo(f"  tags:     {', '.join(detail.tags)}")
     if detail.test_result:
         typer.echo(f"  test:     {testrunner.format_result(detail.test_result)}")
-    if version.confidence and version.confidence != "high":
+    if version.confidence == recovery_service.INCOMPLETE_CONFIDENCE:
+        typer.echo(
+            "  warning:  capture ended before its artifact was recovered; "
+            "working-tree changes were not attributed to this prompt"
+        )
+    elif version.confidence and version.confidence != "high":
         typer.echo(
             f"  warning:  confidence is '{version.confidence}' — "
             "files changed concurrently with this turn; attribution may be imprecise"
@@ -789,6 +802,11 @@ def status() -> None:
     typer.echo(f"versions on branch: {report.visible_versions}")
     if report.test_result:
         typer.echo(f"tests:   {testrunner.format_result(report.test_result)}")
+    if report.open_turn:
+        typer.echo(
+            f"capture: prompt {report.head.id} is still open "
+            "(run `profact recover` if capture was interrupted)"
+        )
 
     if report.dirty:
         typer.echo("working tree: dirty (differs from HEAD — uncommitted changes present)")
@@ -812,6 +830,87 @@ def tui() -> None:
     from .tui.app import run
 
     run(repo_root)
+
+
+@app.command()
+def recover(
+    version_id: str = typer.Argument(
+        None, help="Dangling version id, tag, or HEAD. Omit to list recoverable turns."
+    ),
+    finalize: bool = typer.Option(
+        False,
+        "--finalize",
+        help="Adopt the current working tree as this turn's artifact.",
+    ),
+    preserve: bool = typer.Option(
+        False,
+        "--preserve",
+        help="Close incomplete without attributing current files to the prompt.",
+    ),
+) -> None:
+    """Inspect or explicitly recover prompt turns interrupted before finalization."""
+    repo_root = _resolve_repo_root()
+    _require_init(repo_root)
+
+    if finalize and preserve:
+        typer.echo("error: --finalize and --preserve are mutually exclusive", err=True)
+        raise typer.Exit(2)
+    if version_id is None:
+        if finalize or preserve:
+            typer.echo("error: recovery action requires a version id", err=True)
+            raise typer.Exit(2)
+        candidates = recovery_service.audit(repo_root)
+        if not candidates:
+            typer.echo("No dangling prompt turns to recover.")
+            return
+        typer.echo("Dangling prompt turns:")
+        for candidate in candidates:
+            version = candidate.version
+            head = " HEAD" if candidate.is_branch_head else ""
+            finalize_label = "yes" if candidate.can_finalize else "no"
+            typer.echo(
+                f"  {version.id}  branch={version.git_branch}{head}  "
+                f"finalize={finalize_label}  {log_view.summary(repo_root, version)}"
+            )
+        typer.echo(
+            "\nUse `profact recover <id> --finalize` for the current branch HEAD,"
+        )
+        typer.echo(
+            "or `profact recover <id> --preserve` to close it incomplete "
+            "without changing files."
+        )
+        return
+
+    if not finalize and not preserve:
+        typer.echo(
+            "error: choose --finalize or --preserve (run `profact recover` to inspect)",
+            err=True,
+        )
+        raise typer.Exit(2)
+
+    branch = git_ops.current_branch(repo_root)
+    with store.connect(repo_root) as conn:
+        resolved_id = _resolve_version_token(repo_root, conn, branch, version_id)
+    target_id = resolved_id or version_id
+    try:
+        result = (
+            recovery_service.finalize(repo_root, target_id)
+            if finalize
+            else recovery_service.preserve(repo_root, target_id)
+        )
+    except recovery_service.RecoveryError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(1)
+
+    if result.action == "finalized":
+        typer.echo(
+            f"finalized {result.version.id} from the current working tree "
+            "with uncertain attribution"
+        )
+    else:
+        typer.echo(
+            f"preserved {result.version.id} as incomplete; working files were unchanged"
+        )
 
 
 @app.command()
@@ -841,7 +940,9 @@ def doctor(
     if not fix:
         if report.has_safe_repairs:
             typer.echo("\nrun `profact doctor --fix` to prune the safe-to-remove items above")
-        else:
+        if report.dangling_open_turns:
+            typer.echo("\nrun `profact recover` to inspect unfinished prompt turns")
+        elif not report.has_safe_repairs:
             typer.echo("\nnothing to repair.")
         return
 
@@ -855,8 +956,7 @@ def doctor(
     if report.dangling_open_turns:
         typer.echo(
             f"left {len(report.dangling_open_turns)} dangling open turn(s) "
-            "untouched (real work; "
-            "they finalize on the next prompt)."
+            "untouched (real work; run `profact recover`)."
         )
 
 

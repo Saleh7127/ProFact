@@ -437,6 +437,16 @@ def all_versions(conn: sqlite3.Connection) -> list[Version]:
     return [_row_to_version(row) for row in rows]
 
 
+def dangling_open_turns(conn: sqlite3.Connection) -> list[Version]:
+    """Return prompt turns that never received a finalized tree snapshot."""
+    rows = conn.execute(
+        "SELECT * FROM versions "
+        "WHERE type = 'prompt' AND tree_after IS NULL "
+        "ORDER BY timestamp"
+    ).fetchall()
+    return [_row_to_version(row) for row in rows]
+
+
 def all_heads(conn: sqlite3.Connection) -> dict[str, str | None]:
     """Map every captured Git branch to its current profact HEAD."""
     return {

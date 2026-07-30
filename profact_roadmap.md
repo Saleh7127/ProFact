@@ -295,8 +295,8 @@ deliberately deferred.
 - [x] Content-addressed object storage and SQLite metadata.
 - [x] Prompt DAG with branch-local HEADs and Git-branch carry-over.
 - [x] Safe checkout with automatic checkpoints and protected ignored files.
-- [x] `init`, `start`, `log`, `show`, `status`, `diff`, `checkout`, `note`, and
-  `doctor`.
+- [x] `init`, `start`, `log`, `show`, `status`, `diff`, `checkout`, `note`,
+  `recover`, and `doctor`.
 - [x] Prompt attribution through `blame` and `why`.
 - [x] Regression search through `bisect`.
 - [x] Test-result recording and display through `test` and `log --tests`.
@@ -347,8 +347,10 @@ gates for this milestone live in `profact_tui_spec.md`.
 
 ### Trust and robustness work
 
-- [ ] Add crash recovery for dangling open turns: finalize, preserve, or discard
-  with explicit user choice.
+- [x] Add explicit crash recovery for dangling open turns: inspect, finalize
+  the current branch HEAD with uncertain attribution, or preserve any turn as
+  incomplete without touching files. Destructive discard is deliberately
+  excluded because captured prompts are immutable work, not repair artifacts.
 - [ ] Add a secret scanner for prompts, responses, reasoning, and diffs.
 - [ ] Add configurable redaction and private-path opt-out.
 - [ ] Add `profact.toml` for capture, privacy, test, retention, and UI settings.
@@ -375,9 +377,10 @@ gates for this milestone live in `profact_tui_spec.md`.
 
 ### Recommended order
 
-1. `profact health`.
-2. Interactive TUI.
-3. Crash recovery.
-4. Secret scanning, redaction, and private-path rules.
-5. Replay with transformation-to-transformation comparison.
-6. Export, research tooling, and productionization.
+Completed: `profact health`, the stabilized read-only TUI, and explicit crash
+recovery.
+
+1. Secret scanning, redaction, and private-path rules.
+2. Reliable multi-session capture and branch-switch observation.
+3. Replay with transformation-to-transformation comparison.
+4. Export, research tooling, and productionization.

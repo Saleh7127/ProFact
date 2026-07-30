@@ -526,7 +526,7 @@ It looks for:
   any version; `--fix` deletes them to reclaim space.
 - **Dangling open turns** — `prompt` versions never finalized (`tree_after`
   NULL), e.g. a session that crashed before `stop`. These are **reported only**
-  and never deleted (they hold real work and finalize on the next prompt).
+  by doctor and never deleted. Use `profact recover` to resolve them explicitly.
 
 `doctor` never touches `prompt`/`anchor`/`human` versions or any checkpoint that
 recorded real source changes.
@@ -551,9 +551,12 @@ recorded real source changes.
   attribution is reserved for later. (Claude path uses a watcher quiet-period to
   decide when to snapshot; very fast successive turns could blur a boundary.)
 - **Mid-turn crash.** If Cursor/the machine dies after `beforeSubmitPrompt` but
-  before `stop`, the version stays open (`tree_after` NULL) until the *next*
-  prompt closes it — its diff then spans until that moment. No active recovery
-  on startup yet.
+  before `stop`, the version stays open (`tree_after` NULL). Run `profact
+  recover` to inspect it. `--finalize` adopts the current tree only for the
+  current branch HEAD and marks attribution uncertain; `--preserve` closes any
+  dangling turn as incomplete without touching files, so pending changes can
+  be captured separately with `profact snapshot`. Recovery never deletes
+  captured prompt intent.
 
 ### Design decisions that are limitations by choice
 - **Branch-scoped history with carry-over.** Each Git branch has its own HEAD.

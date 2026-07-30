@@ -54,6 +54,16 @@ def checkout(
             )
 
         head_id = store.read_head(repo_root, branch)
+        head_version = store.get_version(conn, head_id) if head_id else None
+        if (
+            head_version is not None
+            and head_version.type == "prompt"
+            and head_version.tree_after is None
+        ):
+            raise CheckoutError(
+                f"current HEAD {head_version.id} is an unfinished prompt turn; "
+                "run `profact recover` before checkout"
+            )
 
         # A carried-over ancestor is part of this branch's history. A target on
         # another line requires explicit confirmation before it is brought over.
@@ -72,7 +82,6 @@ def checkout(
                 if confirm is None or not confirm(prompt):
                     return CheckoutResult(target=target, aborted=True)
 
-        head_version = store.get_version(conn, head_id) if head_id else None
         current_tree = git_ops.write_tree(repo_root)
         checkpoint = None
 
