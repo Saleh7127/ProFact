@@ -28,6 +28,15 @@ from .. import health, status_view, testrunner, version_detail
 from . import presenter
 from .screens import BranchScreen, FilterScreen, HELP_TEXT, TextScreen
 
+_DETAIL_CONTENT_BY_TAB = {
+    "overview-tab": "overview-content",
+    "prompt-tab": "prompt-content",
+    "thinking-tab": "thinking-content",
+    "response-tab": "response-content",
+    "diff-tab": "diff-content",
+    "tests-tab": "tests-content",
+}
+
 
 class HistoryItem(ListItem):
     def __init__(self, row: presenter.HistoryRow, *, show_graph: bool) -> None:
@@ -60,9 +69,14 @@ class HistoryItem(ListItem):
         text.append(f"  parent:{row.version.parent_id or '-'}", style="#a8a8a8")
         if row.tags:
             text.append(f"  tags:{','.join(row.tags)}", style="#f5c451")
+        show_state = row.version.type == "prompt" or (
+            row.version.confidence and row.version.confidence != "high"
+        )
+        if show_state:
+            text.append("\n")
         if row.version.type == "prompt":
             text.append(
-                f"  thinking:{row.version.thinking_source or 'unknown'}",
+                f"{continuation:<5}thinking:{row.version.thinking_source or 'unknown'}",
                 style="#a8a8a8",
             )
         if row.version.confidence and row.version.confidence != "high":
@@ -178,6 +192,11 @@ class ProFactApp(App[None]):
         height: auto;
         padding: 0 1;
         border-bottom: solid #303532;
+    }
+
+    HistoryItem Static {
+        text-wrap: nowrap;
+        text-overflow: ellipsis;
     }
 
     HistoryItem.is-head {
@@ -475,7 +494,7 @@ class ProFactApp(App[None]):
             return
         if self.screen.has_class("narrow"):
             self.screen.add_class("show-detail")
-        self.query_one("#detail-tabs", TabbedContent).focus()
+        self._focus_active_detail()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id != "search-input":
@@ -561,8 +580,15 @@ class ProFactApp(App[None]):
         self.query_one("#detail-tabs", TabbedContent).active = tab_id
         if self.screen.has_class("narrow"):
             self.screen.add_class("show-detail")
+        self._focus_active_detail()
 
     def action_back(self) -> None:
+        search = self.query_one("#search-input", Input)
+        if search.has_class("visible"):
+            search.value = self.history_query.search
+            search.remove_class("visible")
+            self.query_one("#history-list", ListView).focus()
+            return
         if self.screen.has_class("show-detail"):
             self.screen.remove_class("show-detail")
             self.query_one("#history-list", ListView).focus()
@@ -619,30 +645,39 @@ class ProFactApp(App[None]):
             else "unchecked"
         )
         open_turn = " | open turn" if self.status_report.open_turn else ""
-        filters = (
-            f" | filters: {', '.join(self.history_model.filters)}"
-            if self.history_model.filters
-            else ""
-        )
-        omitted = (
-            f" | {self.history_model.omitted} side paths omitted"
-            if self.history_model.path_mode
-            else ""
-        )
-        result_count = (
-            f" | {len(self.history_model.rows)}/{self.history_model.total_visible} shown"
-        )
-        filtered = (
-            f" | {self.history_model.filtered_out} filtered"
-            if self.history_model.filtered_out
-            else ""
-        )
-        self.query_one("#status-line", Static).update(
-            f"{self.repo_root.name} | Git: {self.status_report.branch} | "
-            f"viewing: {self.history_model.branch} | "
-            f"HEAD: {self.history_model.head_id or '-'} | {dirty}{open_turn}"
-            f"{result_count}{filtered}{filters}{omitted}"
-        )
+        shown = f"{len(self.history_model.rows)}/{self.history_model.total_visible}"
+        if self.size.width < 100:
+            status = (
+                f"Git: {self.status_report.branch} | view: {self.history_model.branch} | "
+                f"HEAD: {self.history_model.head_id or '-'} | {dirty} | {shown} shown"
+            )
+            if self.history_model.filtered_out:
+                status += f" | {self.history_model.filtered_out} filtered"
+            if self.history_model.path_mode:
+                status += f" | {self.history_model.omitted} omitted"
+        else:
+            filters = (
+                f" | filters: {', '.join(self.history_model.filters)}"
+                if self.history_model.filters
+                else ""
+            )
+            omitted = (
+                f" | {self.history_model.omitted} side paths omitted"
+                if self.history_model.path_mode
+                else ""
+            )
+            filtered = (
+                f" | {self.history_model.filtered_out} filtered"
+                if self.history_model.filtered_out
+                else ""
+            )
+            status = (
+                f"{self.repo_root.name} | Git: {self.status_report.branch} | "
+                f"viewing: {self.history_model.branch} | "
+                f"HEAD: {self.history_model.head_id or '-'} | {dirty} | "
+                f"{shown} shown{filtered}{filters}{omitted}"
+            )
+        self.query_one("#status-line", Static).update(status + open_turn)
 
     def _select_version(self, version_id: str) -> None:
         if self.history_model is None:
@@ -658,6 +693,12 @@ class ProFactApp(App[None]):
         log.clear()
         log.write(content)
         log.scroll_home(animate=False)
+
+    def _focus_active_detail(self) -> None:
+        active = self.query_one("#detail-tabs", TabbedContent).active
+        content_id = _DETAIL_CONTENT_BY_TAB.get(active)
+        if content_id:
+            self.query_one(f"#{content_id}", RichLog).focus()
 
     def _clear_detail(self) -> None:
         for identifier in (

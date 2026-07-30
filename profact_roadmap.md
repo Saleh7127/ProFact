@@ -328,6 +328,8 @@ deliberately deferred.
   - [x] Add reusable version-detail, graph-layout, status, and presenter models.
   - [x] Add the read-only Textual browser, responsive detail tabs, search,
     filters, branch viewing, ancestry mode, health, help, and manual refresh.
+  - [x] Stabilize dense wide/narrow rendering, keyboard scrolling, empty and
+    missing-content states, and startup/quit worker behavior through Pilot use.
   - [ ] Add guarded checkout and repository-wide tag actions after read-only
     interaction stability is established.
   - DAG and branch navigation.

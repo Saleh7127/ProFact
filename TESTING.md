@@ -52,7 +52,7 @@ Expected: all tests pass. Coverage by area:
 | `test_version_detail.py` | shared prompt/reasoning/response/diff/test content model |
 | `test_status_view.py` | shared branch/HEAD/dirty/open-turn status model |
 | `test_tui_presenter.py` | framework-free history, search, detail, and health screen models |
-| `test_tui_app.py` | Textual Pilot navigation, responsive layout, branch viewing, filters, and help |
+| `test_tui_app.py` | Textual Pilot navigation, dense wide/narrow rendering, scrolling, branch viewing, filters, empty/missing data, and worker teardown |
 
 ---
 

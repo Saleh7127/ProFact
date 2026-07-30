@@ -155,7 +155,7 @@ u                Jump to selected version's parent
 H                Jump to viewed branch HEAD
 r                Refresh history and working-tree status
 ?                Open this help
-Escape           Return from narrow detail or close a screen
+Escape           Cancel search, return from detail, or close a screen
 q                Quit from the main screen
 
 Selecting a version never moves ProFact HEAD or changes files.
