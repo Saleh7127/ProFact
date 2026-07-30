@@ -7,9 +7,11 @@ from pathlib import Path
 
 import typer
 
+from . import config
 from . import checkout as checkout_service
 from . import doctor as doctor_service
 from . import health as health_service
+from . import privacy_audit as privacy_audit_service
 from . import recovery as recovery_service
 from . import (
     git_ops,
@@ -22,6 +24,8 @@ from . import (
 )
 
 app = typer.Typer(help="Prompt-native version control for AI-assisted development.")
+privacy_app = typer.Typer(help="Inspect and enforce repository privacy policy.")
+app.add_typer(privacy_app, name="privacy")
 
 
 def _resolve_repo_root() -> Path:
@@ -911,6 +915,51 @@ def recover(
         typer.echo(
             f"preserved {result.version.id} as incomplete; working files were unchanged"
         )
+
+
+@privacy_app.command("scan")
+def privacy_scan(
+    fix: bool = typer.Option(
+        False,
+        "--fix",
+        help="Rewrite referenced objects with redacted content.",
+    ),
+) -> None:
+    """Scan stored prompts, reasoning, responses, diffs, and test output."""
+    repo_root = _resolve_repo_root()
+    _require_init(repo_root)
+    try:
+        report = privacy_audit_service.scan(repo_root, fix=fix)
+    except config.ConfigError as exc:
+        typer.echo(f"error: invalid profact.toml: {exc}", err=True)
+        raise typer.Exit(2)
+
+    if not report.findings:
+        typer.echo(
+            f"No stored secrets detected in {report.scanned_objects} object(s)."
+        )
+        return
+
+    typer.echo(
+        f"Detected {len(report.findings)} secret occurrence(s) in stored history:"
+    )
+    for finding in report.findings:
+        typer.echo(
+            f"  {finding.version_id}  {finding.section}  {finding.rule}  "
+            f"line {finding.line}: {finding.masked_excerpt}"
+        )
+    if fix:
+        typer.echo(
+            f"\nupdated {report.updated_references} reference(s) across "
+            f"{report.replaced_objects} object(s) and removed "
+            f"{report.removed_unsafe_objects} unsafe original/orphan object(s)"
+        )
+    else:
+        typer.echo("\nrun `profact privacy scan --fix` to redact these objects")
+    typer.echo(
+        "note: this scans ProFact's object store; existing Git commits/objects "
+        "are outside its scope"
+    )
 
 
 @app.command()

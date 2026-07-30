@@ -53,6 +53,9 @@ Expected: all tests pass. Coverage by area:
 | `test_status_view.py` | shared branch/HEAD/dirty/open-turn status model |
 | `test_tui_presenter.py` | framework-free history, search, detail, and health screen models |
 | `test_tui_app.py` | Textual Pilot navigation, dense wide/narrow rendering, scrolling, branch viewing, filters, empty/missing data, and worker teardown |
+| `test_privacy.py` | built-in/custom redaction, config safety, object hashing, and adapter consistency |
+| `test_private_paths.py` | private paths never enter snapshots/diffs and survive checkout |
+| `test_privacy_audit.py` | masked historical scans, reference remediation, and unsafe-orphan cleanup |
 
 ---
 

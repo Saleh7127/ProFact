@@ -198,6 +198,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
 
 
 def write_object(repo_root: Path, text: str) -> str:
+    from . import privacy
+
+    text, _findings = privacy.redact_for(repo_root, text)
     data = text.encode("utf-8")
     digest = hashlib.sha256(data).hexdigest()
     path = objects_dir(repo_root) / digest

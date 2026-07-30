@@ -41,6 +41,7 @@ profact tui               # browse the captured history interactively
 | `profact health` | Summarize captured activity, tests, churn, and history attention |
 | `profact tui` | Browse captured history in an interactive terminal UI |
 | `profact recover` | Inspect and recover prompt turns interrupted before finalization |
+| `profact privacy scan` | Report masked secrets in stored history (`--fix` redacts them) |
 | `profact doctor` | Check (and `--fix`) the profact store |
 
 ## Crash recovery
@@ -58,6 +59,35 @@ distinguished reliably. Preserve keeps the prompt/response record, records no
 artifact, and lets current changes be captured separately with `profact
 snapshot`. ProFact does not delete a crashed prompt: destructive discard would
 contradict its immutable, never-lose-work history model.
+
+## Privacy controls
+
+High-precision secret redaction is enabled by default for newly stored prompts,
+reasoning, responses, diffs, and test output. Configure repository-specific
+rules in an optional, commit-safe `profact.toml`:
+
+```toml
+[privacy]
+private_paths = [".env", "secrets/**", "customer-data/"]
+redact_patterns = ["INTERNAL-[0-9]{8}"]
+```
+
+Private paths never enter ProFact snapshots or diffs, are left untouched by
+ProFact checkout, and remain available to normal Git if deliberately tracked.
+`profact.toml` itself is never restored by ProFact checkout, preventing time
+travel from silently weakening the active policy.
+
+Audit history captured before privacy controls were enabled:
+
+```sh
+profact privacy scan
+profact privacy scan --fix
+```
+
+Reports contain masked excerpts only. `--fix` updates referenced ProFact
+objects and removes unsafe unreferenced originals. Existing Git commits and Git
+objects are not rewritten; remove secrets from Git history separately when
+needed.
 
 ## Interactive history
 

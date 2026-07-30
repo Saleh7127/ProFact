@@ -307,6 +307,8 @@ deliberately deferred.
   preparation live outside `cli.py`.
 - [x] `profact health` repository-history summary with activity, test, churn,
   topology, and attention findings.
+- [x] Privacy controls with default secret redaction, configurable private
+  paths/custom patterns, and masked historical scan/remediation.
 
 ### Completed milestone — make existing history immediately useful
 
@@ -351,9 +353,11 @@ gates for this milestone live in `profact_tui_spec.md`.
   the current branch HEAD with uncertain attribution, or preserve any turn as
   incomplete without touching files. Destructive discard is deliberately
   excluded because captured prompts are immutable work, not repair artifacts.
-- [ ] Add a secret scanner for prompts, responses, reasoning, and diffs.
-- [ ] Add configurable redaction and private-path opt-out.
-- [ ] Add `profact.toml` for capture, privacy, test, retention, and UI settings.
+- [x] Add a secret scanner for prompts, responses, reasoning, diffs, and test
+  output at the object-store boundary.
+- [x] Add configurable redaction and private-path opt-out.
+- [x] Add the `[privacy]` table in repository-level `profact.toml`; capture,
+  test, retention, and UI settings remain future extensions.
 - [ ] Make Git branch carry-over precise with branch-switch observation.
 - [ ] Add multi-session event routing before claiming concurrent-session
   support; solve or clearly mark overlapping-edit attribution.
@@ -377,10 +381,9 @@ gates for this milestone live in `profact_tui_spec.md`.
 
 ### Recommended order
 
-Completed: `profact health`, the stabilized read-only TUI, and explicit crash
-recovery.
+Completed: `profact health`, the stabilized read-only TUI, explicit crash
+recovery, and local privacy controls.
 
-1. Secret scanning, redaction, and private-path rules.
-2. Reliable multi-session capture and branch-switch observation.
-3. Replay with transformation-to-transformation comparison.
-4. Export, research tooling, and productionization.
+1. Reliable multi-session capture and branch-switch observation.
+2. Replay with transformation-to-transformation comparison.
+3. Export, research tooling, and productionization.

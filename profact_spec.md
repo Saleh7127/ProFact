@@ -200,6 +200,7 @@ profact test [--version <id>] -- <cmd>  # run a test command; record pass/fail/e
 profact checkout <id> [-f]      # §8 — auto-checkpoint, restore tree, move HEAD; preserves ignored files; prompts before a cross-branch target (--force skips)
 profact status                  # current HEAD id, branch, dirty-vs-HEAD, any open/in-progress version
 profact recover [<id> (--finalize|--preserve)]  # inspect/close interrupted prompt turns; never deletes captured intent
+profact privacy scan [--fix]    # masked audit/redaction of stored text objects; private paths configured in profact.toml
 profact doctor [--fix]          # report/prune history artifacts: phantom checkpoints, orphaned objects (dangling turns report-only)
 ```
 
