@@ -77,12 +77,14 @@ def finalize(repo_root: Path, version_id: str) -> RecoveryResult:
         diff_ref = store.write_object(repo_root, diff) if diff.strip() else None
         cursor = conn.execute(
             "UPDATE versions SET tree_after = ?, diff_ref = ?, confidence = ?, "
+            "confidence_reason = COALESCE(confidence_reason, ?), "
             "thinking_source = COALESCE(thinking_source, ?) "
             "WHERE id = ? AND type = 'prompt' AND tree_after IS NULL",
             (
                 tree_after,
                 diff_ref,
                 "uncertain",
+                "turn finalized after interrupted capture",
                 store.THINKING_NONE,
                 version.id,
             ),

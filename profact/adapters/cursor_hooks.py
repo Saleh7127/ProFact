@@ -1,9 +1,9 @@
 """Cursor Hooks capture adapter (primary).
 
 Cursor invokes a hook as a short-lived process per event, so this adapter holds
-no in-memory state: each call is a direct, idempotent write to the profact store.
-The only state carried between events is *which version is currently open* — the
-HEAD prompt version whose ``tree_after`` is still NULL (LOCKED decision (b)).
+no in-memory state. Cursor's ``conversation_id`` + ``generation_id`` route each
+event to its durable prompt row; legacy payloads without ids retain the original
+branch-HEAD fallback.
 
 Event flow for one user turn:
     beforeSubmitPrompt  -> open a `prompt` version, snapshot tree_before, move HEAD
@@ -121,15 +121,13 @@ def handle(repo_root: Path, event: dict) -> dict:
     elif name == EVENT_RESPONSE:
         _on_response(repo_root, event)
     elif name == EVENT_STOP:
-        with store.connect(repo_root) as conn:
-            _finalize_open(repo_root, conn)
+        _finalize_event(repo_root, event)
     elif name == EVENT_SESSION_END:
+        _finalize_event(repo_root, event)
         with store.connect(repo_root) as conn:
-            _finalize_open(repo_root, conn)
-        # Capture manual work performed after the last finalized prompt when
-        # Cursor gives us a session boundary. Edits made after sessionEnd remain
-        # visible as a dirty tree until the next prompt reconciles them.
-        human_edits.reconcile(repo_root)
+            has_open_turns = bool(store.open_prompts(conn))
+        if not has_open_turns:
+            human_edits.reconcile(repo_root)
     return {}
 
 
@@ -143,9 +141,7 @@ def _record_debug_event(repo_root: Path, event: dict) -> None:
         with log_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(event) + "\n")
     except Exception:
-        # Hook debugging must never interfere with capture.
         pass
-
 
 def _ensure_gitignore(repo_root: Path, *entries: str) -> None:
     gitignore = repo_root / ".gitignore"
@@ -162,30 +158,48 @@ def _ensure_gitignore(repo_root: Path, *entries: str) -> None:
 
 def _on_prompt(repo_root: Path, event: dict) -> None:
     branch = git_ops.current_branch(repo_root)
+    conversation_id, generation_id = _event_identity(event)
     prompt_text = event.get("prompt") or ""
     prompt_ref = store.write_object(repo_root, prompt_text) if prompt_text else None
 
-    # Close a prompt whose stop event was lost before looking for human work.
     with store.connect(repo_root) as conn:
-        _finalize_open(repo_root, conn)
+        existing = store.find_prompt_by_turn(conn, conversation_id, generation_id)
+        if existing is not None:
+            if existing.prompt_ref == prompt_ref:
+                return
+            # Older Cursor payloads/tests may reuse a generation id. The new
+            # turn remains session-routable as the sole open turn but cannot
+            # honestly claim the duplicated external turn key.
+            generation_id = None
+        if conversation_id:
+            previous = store.open_prompts(conn, conversation_id=conversation_id)
+        else:
+            legacy = _legacy_open_prompt(repo_root, conn)
+            previous = [legacy] if legacy else []
 
-    # Everything between the previous finalized snapshot and this prompt is one
-    # human version, regardless of how many files or saves were involved.
-    reconciliation = human_edits.reconcile(repo_root, branch)
-    parent_id = store.read_head(repo_root, branch)
+    # A new prompt proves prior turns in this conversation are no longer live.
+    # Other conversations remain open and are never closed by this event.
+    for version in previous:
+        _finalize_version(repo_root, version.id)
+
     with store.connect(repo_root) as conn:
-        version = store.create_version(
-            conn,
-            type="prompt",
-            git_branch=branch,
-            parent_id=parent_id,
-            tree_before=reconciliation.tree,
-            prompt_ref=prompt_ref,
-            model=event.get("model"),
-            generation_id=event.get("generation_id"),
-            conversation_id=event.get("conversation_id"),
-        )
-    store.write_head(repo_root, branch, version.id)
+        if store.find_prompt_by_turn(conn, conversation_id, generation_id):
+            return
+        other_open = store.open_prompts(conn)
+
+    if other_open:
+        tree_before = git_ops.write_tree(repo_root)
+    else:
+        tree_before = human_edits.reconcile(repo_root, branch).tree
+    store.create_prompt_at_head(
+        repo_root,
+        git_branch=branch,
+        tree_before=tree_before,
+        prompt_ref=prompt_ref,
+        model=event.get("model"),
+        conversation_id=conversation_id,
+        generation_id=generation_id,
+    )
 
 
 def _on_thought(repo_root: Path, event: dict) -> None:
@@ -198,7 +212,8 @@ def _on_thought(repo_root: Path, event: dict) -> None:
     if not text:
         return
     with store.connect(repo_root) as conn:
-        version = _open_prompt(repo_root, conn)
+        conn.execute("BEGIN IMMEDIATE")
+        version = _resolve_prompt(repo_root, conn, event)
         if version is None:
             return
         existing = (
@@ -208,9 +223,18 @@ def _on_thought(repo_root: Path, event: dict) -> None:
         )
         combined = f"{existing}\n{text}" if existing else text
         thinking_ref = store.write_object(repo_root, combined)
+        late = version.tree_after is not None
+        confidence = "uncertain" if late else version.confidence
+        reason = (
+            "capture event arrived after turn finalization"
+            if late
+            else version.confidence_reason
+        )
         conn.execute(
-            "UPDATE versions SET thinking_ref = ?, thinking_source = ? WHERE id = ?",
-            (thinking_ref, store.THINKING_CAPTURED, version.id),
+            "UPDATE versions SET thinking_ref = ?, thinking_source = ?, "
+            "confidence = ?, confidence_reason = COALESCE(confidence_reason, ?) "
+            "WHERE id = ?",
+            (thinking_ref, store.THINKING_CAPTURED, confidence, reason, version.id),
         )
         conn.commit()
 
@@ -220,7 +244,8 @@ def _on_response(repo_root: Path, event: dict) -> None:
     if not text:
         return
     with store.connect(repo_root) as conn:
-        version = _open_prompt(repo_root, conn)
+        conn.execute("BEGIN IMMEDIATE")
+        version = _resolve_prompt(repo_root, conn, event)
         if version is None:
             return
         existing = (
@@ -230,33 +255,108 @@ def _on_response(repo_root: Path, event: dict) -> None:
         )
         combined = f"{existing}\n{text}" if existing else text
         response_ref = store.write_object(repo_root, combined)
+        late = version.tree_after is not None
+        confidence = "uncertain" if late else version.confidence
+        reason = (
+            "capture event arrived after turn finalization"
+            if late
+            else version.confidence_reason
+        )
         conn.execute(
-            "UPDATE versions SET response_ref = ?, model = COALESCE(model, ?) WHERE id = ?",
-            (response_ref, event.get("model"), version.id),
+            "UPDATE versions SET response_ref = ?, model = COALESCE(model, ?), "
+            "confidence = ?, confidence_reason = COALESCE(confidence_reason, ?) "
+            "WHERE id = ?",
+            (response_ref, event.get("model"), confidence, reason, version.id),
         )
         conn.commit()
 
 
-def _finalize_open(repo_root: Path, conn: sqlite3.Connection) -> None:
-    """Snapshot tree_after + diff for the currently open turn, if any. Idempotent."""
-    version = _open_prompt(repo_root, conn)
+def _finalize_event(repo_root: Path, event: dict) -> None:
+    with store.connect(repo_root) as conn:
+        version = _resolve_prompt(repo_root, conn, event)
     if version is None:
         return
+    _finalize_version(repo_root, version.id)
+
+
+def _finalize_version(repo_root: Path, version_id: str) -> bool:
+    """Finalize one exact turn with compare-and-set idempotency."""
+    with store.connect(repo_root) as conn:
+        version = store.get_version(conn, version_id)
+    if version is None or version.type != "prompt" or version.tree_after is not None:
+        return False
+
     tree_after = git_ops.write_tree(repo_root)
     diff = git_ops.diff_trees(repo_root, version.tree_before, tree_after)
     diff_ref = store.write_object(repo_root, diff) if diff.strip() else None
-    # Stamp an explicit "no reasoning" marker if no thinking block ever arrived,
-    # so history distinguishes "model can't/didn't think" from "not yet recorded".
-    conn.execute(
-        "UPDATE versions SET tree_after = ?, diff_ref = ?, "
-        "thinking_source = COALESCE(thinking_source, ?) WHERE id = ?",
-        (tree_after, diff_ref, store.THINKING_NONE, version.id),
-    )
-    conn.commit()
+    current_branch = git_ops.current_branch(repo_root)
+    with store.connect(repo_root) as conn:
+        current = store.get_version(conn, version.id)
+        if current is None or current.tree_after is not None:
+            return False
+        open_now = store.open_prompts(conn)
+        overlap = any(item.id != version.id for item in open_now)
+        branch_changed = current_branch != version.git_branch
+        reason = None
+        if overlap:
+            reason = "overlapping sessions shared one working tree"
+            store.mark_versions_uncertain(
+                conn, [item.id for item in open_now], reason
+            )
+        elif branch_changed:
+            reason = "git branch changed while turn was open"
+        confidence = (
+            "uncertain" if overlap or branch_changed else current.confidence
+        )
+        cursor = conn.execute(
+            "UPDATE versions SET tree_after = ?, diff_ref = ?, confidence = ?, "
+            "confidence_reason = COALESCE(confidence_reason, ?), "
+            "thinking_source = COALESCE(thinking_source, ?) "
+            "WHERE id = ? AND tree_after IS NULL",
+            (
+                tree_after,
+                diff_ref,
+                confidence,
+                reason,
+                store.THINKING_NONE,
+                version.id,
+            ),
+        )
+        conn.commit()
+        return cursor.rowcount == 1
 
 
-def _open_prompt(repo_root: Path, conn: sqlite3.Connection) -> store.Version | None:
-    """The open turn = the HEAD `prompt` version not yet finalized (tree_after NULL)."""
+def _resolve_prompt(
+    repo_root: Path, conn: sqlite3.Connection, event: dict
+) -> store.Version | None:
+    conversation_id, generation_id = _event_identity(event)
+    exact = store.find_prompt_by_turn(conn, conversation_id, generation_id)
+    if exact is not None:
+        if exact.tree_after is not None and conversation_id:
+            collision_fallbacks = [
+                version
+                for version in store.open_prompts(
+                    conn, conversation_id=conversation_id
+                )
+                if version.generation_id is None
+            ]
+            if len(collision_fallbacks) == 1:
+                return collision_fallbacks[0]
+        return exact
+    if conversation_id and generation_id:
+        return None
+    if conversation_id:
+        open_for_session = store.open_prompts(
+            conn, conversation_id=conversation_id
+        )
+        return open_for_session[-1] if open_for_session else None
+    return _legacy_open_prompt(repo_root, conn)
+
+
+def _legacy_open_prompt(
+    repo_root: Path, conn: sqlite3.Connection
+) -> store.Version | None:
+    """Compatibility fallback for hook payloads that carry no turn ids."""
     branch = git_ops.current_branch(repo_root)
     head = store.read_head(repo_root, branch, seed=False)
     if not head:
@@ -265,3 +365,12 @@ def _open_prompt(repo_root: Path, conn: sqlite3.Connection) -> store.Version | N
     if version and version.type == "prompt" and version.tree_after is None:
         return version
     return None
+
+
+def _event_identity(event: dict) -> tuple[str | None, str | None]:
+    conversation = event.get("conversation_id")
+    generation = event.get("generation_id")
+    return (
+        str(conversation) if conversation else None,
+        str(generation) if generation else None,
+    )

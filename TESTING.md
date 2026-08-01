@@ -56,6 +56,7 @@ Expected: all tests pass. Coverage by area:
 | `test_privacy.py` | built-in/custom redaction, config safety, object hashing, and adapter consistency |
 | `test_private_paths.py` | private paths never enter snapshots/diffs and survive checkout |
 | `test_privacy_audit.py` | masked historical scans, reference remediation, and unsafe-orphan cleanup |
+| `test_multi_session.py` | interleaved Cursor/Claude routing, idempotency, atomic parentage, overlap/branch warnings, migration, and session visibility |
 
 ---
 
@@ -546,9 +547,11 @@ recorded real source changes.
 - **Cloud agents not supported.** Cursor cloud agents fire only tool-level
   hooks (no `beforeSubmitPrompt`/`stop`/`sessionEnd`), so capture there is out
   of scope.
-- **One active session at a time.** The open turn is identified as "the HEAD
-  prompt version whose `tree_after` is NULL." Two concurrent agent sessions in
-  the same repo would interleave and mis-attribute. Single local user assumed.
+- **Concurrent sessions share one working tree.** Prompt/thought/response/stop
+  events route reliably by session and turn identity, and duplicate hooks are
+  idempotent. If open intervals overlap, both versions are marked uncertain
+  because tree snapshots cannot prove which agent wrote each file. Exact
+  concurrent file ownership requires isolated worktrees or per-write provenance.
 - **Diffs are tree snapshots, not per-edit.** `afterFileEdit` is intentionally
   not wired; the diff is `git diff <tree_before> <tree_after>`. Exact per-edit
   attribution is reserved for later. (Claude path uses a watcher quiet-period to

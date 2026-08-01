@@ -644,7 +644,11 @@ class ProFactApp(App[None]):
             if self.status_report.dirty is False
             else "unchecked"
         )
-        open_turn = " | open turn" if self.status_report.open_turn else ""
+        open_turn = (
+            f" | {len(self.status_report.open_turns)} open turn(s)"
+            if self.status_report.open_turns
+            else ""
+        )
         shown = f"{len(self.history_model.rows)}/{self.history_model.total_visible}"
         if self.size.width < 100:
             status = (

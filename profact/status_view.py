@@ -16,7 +16,12 @@ class StatusReport:
     visible_versions: int
     test_result: store.TestResult | None
     dirty: bool | None
-    open_turn: bool
+    open_turns: tuple[store.Version, ...]
+
+    @property
+    def open_turn(self) -> bool:
+        """Compatibility shorthand for callers that only need a boolean."""
+        return bool(self.open_turns)
 
 
 def inspect(repo_root: Path, *, include_dirty: bool = True) -> StatusReport:
@@ -26,17 +31,17 @@ def inspect(repo_root: Path, *, include_dirty: bool = True) -> StatusReport:
     head = None
     visible_versions = 0
     test_result = None
-
-    if head_id is not None:
-        conn = store.connect(repo_root)
-        try:
+    conn = store.connect(repo_root)
+    try:
+        if head_id is not None:
             head = store.get_version(conn, head_id)
             visible_versions = len(
                 store.list_branch_versions(conn, branch, head=head_id)
             )
             test_result = store.get_test_result(conn, head_id)
-        finally:
-            conn.close()
+        open_turns = tuple(store.open_prompts(conn, git_branch=branch))
+    finally:
+        conn.close()
 
     dirty = None
     if include_dirty and head is not None:
@@ -50,7 +55,13 @@ def inspect(repo_root: Path, *, include_dirty: bool = True) -> StatusReport:
         visible_versions=visible_versions,
         test_result=test_result,
         dirty=dirty,
-        open_turn=bool(
-            head is not None and head.type == "prompt" and head.tree_after is None
-        ),
+        open_turns=open_turns,
     )
+
+
+def session_label(version: store.Version, *, max_length: int = 22) -> str:
+    """Compact, non-secret session label for status and recovery views."""
+    label = version.conversation_id or "legacy"
+    if len(label) <= max_length:
+        return label
+    return label[: max_length - 1] + "…"

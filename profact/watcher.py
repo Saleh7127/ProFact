@@ -9,6 +9,8 @@ from .session import CaptureSession
 
 DEFAULT_QUIET_PERIOD = 2.0
 DEFAULT_MAX_WAIT = 30.0
+STARTUP_TIMEOUT = 5.0
+READY_PULSE_MS = 50
 
 
 def _ignore(_change, path: str) -> bool:
@@ -36,21 +38,31 @@ class Watcher:
         self._step = max(int(quiet_period * 1000), 1)
         self._debounce = max(int(max_wait * 1000), self._step)
         self._stop = threading.Event()
+        self._ready = threading.Event()
         self._thread: threading.Thread | None = None
 
     def start(self) -> None:
         self._thread = threading.Thread(target=self.run, daemon=True)
         self._thread.start()
+        if not self._ready.wait(STARTUP_TIMEOUT):
+            raise RuntimeError("profact watcher did not become ready")
 
     def run(self) -> None:
-        for changes in watch(
-            self.repo_root,
-            step=self._step,
-            debounce=self._debounce,
-            watch_filter=_ignore,
-            stop_event=self._stop,
-        ):
-            self.session.settle([path for _, path in changes])
+        try:
+            for changes in watch(
+                self.repo_root,
+                step=self._step,
+                debounce=self._debounce,
+                watch_filter=_ignore,
+                stop_event=self._stop,
+                rust_timeout=READY_PULSE_MS,
+                yield_on_timeout=True,
+            ):
+                self._ready.set()
+                if changes:
+                    self.session.settle([path for _, path in changes])
+        finally:
+            self._ready.set()
 
     def stop(self) -> None:
         self._stop.set()

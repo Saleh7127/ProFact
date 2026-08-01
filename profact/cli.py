@@ -307,10 +307,10 @@ def show(
             "working-tree changes were not attributed to this prompt"
         )
     elif version.confidence and version.confidence != "high":
-        typer.echo(
-            f"  warning:  confidence is '{version.confidence}' — "
+        reason = version.confidence_reason or (
             "files changed concurrently with this turn; attribution may be imprecise"
         )
+        typer.echo(f"  warning:  confidence is '{version.confidence}' — {reason}")
 
     if detail.prompt:
         typer.echo("\nprompt:")
@@ -793,10 +793,12 @@ def status() -> None:
     typer.echo(f"branch:  {report.branch}")
     if report.head_id is None:
         typer.echo("HEAD:    (none yet)")
+        _echo_open_turns(report)
         return
 
     if report.head is None:
         typer.echo(f"HEAD:    {report.head_id} (missing from store)")
+        _echo_open_turns(report)
         return
 
     typer.echo(
@@ -806,11 +808,7 @@ def status() -> None:
     typer.echo(f"versions on branch: {report.visible_versions}")
     if report.test_result:
         typer.echo(f"tests:   {testrunner.format_result(report.test_result)}")
-    if report.open_turn:
-        typer.echo(
-            f"capture: prompt {report.head.id} is still open "
-            "(run `profact recover` if capture was interrupted)"
-        )
+    _echo_open_turns(report)
 
     if report.dirty:
         typer.echo("working tree: dirty (differs from HEAD — uncommitted changes present)")
@@ -874,6 +872,7 @@ def recover(
             finalize_label = "yes" if candidate.can_finalize else "no"
             typer.echo(
                 f"  {version.id}  branch={version.git_branch}{head}  "
+                f"session={status_view.session_label(version)}  "
                 f"finalize={finalize_label}  {log_view.summary(repo_root, version)}"
             )
         typer.echo(
@@ -1013,6 +1012,20 @@ def _require_init(repo_root: Path) -> None:
     if not store.is_initialized(repo_root):
         typer.echo("error: profact is not initialized; run `profact init` first", err=True)
         raise typer.Exit(1)
+
+
+def _echo_open_turns(report: status_view.StatusReport) -> None:
+    if not report.open_turns:
+        return
+    noun = "turn" if len(report.open_turns) == 1 else "turns"
+    labels = ", ".join(
+        f"{version.id} ({status_view.session_label(version)})"
+        for version in report.open_turns
+    )
+    typer.echo(
+        f"capture: {len(report.open_turns)} open {noun}: {labels} "
+        "(run `profact recover` if capture was interrupted)"
+    )
 
 
 def _resolve_version_token(

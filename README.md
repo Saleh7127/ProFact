@@ -89,6 +89,21 @@ objects and removes unsafe unreferenced originals. Existing Git commits and Git
 objects are not rewritten; remove secrets from Git history separately when
 needed.
 
+## Multiple capture sessions
+
+ProFact routes concurrent Cursor events by `conversation_id` and
+`generation_id`; each Claude proxy launch receives its own durable session id.
+Duplicate prompt/stop hooks are idempotent, late responses return to their
+original turn, and concurrent prompt opens advance branch HEAD atomically.
+`profact status` and `profact recover` identify every open session on the
+branch. Run simultaneous Claude launches on distinct `--port` values.
+
+All sessions still share the repository's working tree. If their open intervals
+overlap, ProFact preserves each prompt/response and snapshot but marks every
+affected version `uncertain` with the reason. It does not claim which session
+wrote individual files; exact concurrent filesystem attribution would require
+isolated worktrees or per-write provenance.
+
 ## Interactive history
 
 `profact tui` opens a read-only history browser with a navigable DAG and tabs

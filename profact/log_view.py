@@ -399,6 +399,8 @@ def _row_detail(
         details.append(f"thinking: {version.thinking_source or 'unknown'}")
     if version.confidence and version.confidence != "high":
         details.append(f"confidence: {version.confidence}")
+        if version.confidence_reason:
+            details.append(f"reason: {_short(version.confidence_reason, 52)}")
 
     if tests is not None:
         result = tests.get(version.id)

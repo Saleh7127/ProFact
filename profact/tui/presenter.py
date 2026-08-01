@@ -162,6 +162,8 @@ def overview_text(detail: version_detail.VersionDetail) -> str:
         f"Finalized: {'yes' if version.tree_after is not None else 'no (open turn)'}",
         f"Confidence: {version.confidence or 'unknown'}",
     ]
+    if version.confidence_reason:
+        lines.append(f"Confidence reason: {version.confidence_reason}")
     if version.model:
         model = version.model
         if version.temperature is not None:

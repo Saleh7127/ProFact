@@ -171,7 +171,9 @@ Effort/Impact are rough (Low / Med / High). ★ = strong thesis contribution.
 
 ### 3.8 Robustness & productionization
 - **Multi-session support** — track open turns by session/generation instead of
-  assuming one active session (lifts a core MVP limit). *Impact: Very High · Effort: High.*
+  assuming one active session; event routing and overlap labeling are
+  implemented. Exact shared-tree file authorship remains intentionally
+  unclaimed. ✅ *Impact: Very High · Effort: High.*
 - **Crash recovery** — on startup, detect dangling open turns and offer to
   finalize/discard/checkpoint. *Impact: High · Effort: Med.*
 - **Git branch-switch hooks** — observe branch changes to make carry-over
@@ -309,6 +311,9 @@ deliberately deferred.
   topology, and attention findings.
 - [x] Privacy controls with default secret redaction, configurable private
   paths/custom patterns, and masked historical scan/remediation.
+- [x] Reliable multi-session event routing with durable Cursor/Claude turn
+  identities, idempotent hooks, atomic branch ordering, and honest overlap and
+  branch-switch attribution warnings.
 
 ### Completed milestone — make existing history immediately useful
 
@@ -358,9 +363,12 @@ gates for this milestone live in `profact_tui_spec.md`.
 - [x] Add configurable redaction and private-path opt-out.
 - [x] Add the `[privacy]` table in repository-level `profact.toml`; capture,
   test, retention, and UI settings remain future extensions.
-- [ ] Make Git branch carry-over precise with branch-switch observation.
-- [ ] Add multi-session event routing before claiming concurrent-session
-  support; solve or clearly mark overlapping-edit attribution.
+- [x] Preserve turn routing across Git branch switches and mark the affected
+  version uncertain without moving the new branch's ProFact HEAD. Full external
+  branch-switch observation is unnecessary for this local routing contract.
+- [x] Add multi-session event routing and clearly mark overlapping-edit
+  attribution as uncertain; exact file ownership in one working tree remains
+  out of scope.
 - [ ] Profile and optimize snapshotting for large repositories.
 
 ### Deferred features
@@ -382,8 +390,8 @@ gates for this milestone live in `profact_tui_spec.md`.
 ### Recommended order
 
 Completed: `profact health`, the stabilized read-only TUI, explicit crash
-recovery, and local privacy controls.
+recovery, local privacy controls, and reliable multi-session event routing.
 
-1. Reliable multi-session capture and branch-switch observation.
-2. Replay with transformation-to-transformation comparison.
-3. Export, research tooling, and productionization.
+1. Replay with transformation-to-transformation comparison.
+2. Redacted export and research tooling.
+3. Large-repository profiling and release productionization.

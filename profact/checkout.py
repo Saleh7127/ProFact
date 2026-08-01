@@ -55,13 +55,11 @@ def checkout(
 
         head_id = store.read_head(repo_root, branch)
         head_version = store.get_version(conn, head_id) if head_id else None
-        if (
-            head_version is not None
-            and head_version.type == "prompt"
-            and head_version.tree_after is None
-        ):
+        open_turns = store.open_prompts(conn)
+        if open_turns:
+            identifiers = ", ".join(version.id for version in open_turns)
             raise CheckoutError(
-                f"current HEAD {head_version.id} is an unfinished prompt turn; "
+                f"repository has unfinished prompt turn(s): {identifiers}; "
                 "run `profact recover` before checkout"
             )
 
