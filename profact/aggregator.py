@@ -12,6 +12,12 @@ RESPONSE = "response"
 IGNORE = "ignore"
 
 DEFAULT_IDLE_TIMEOUT = 60.0
+USAGE_KEYS = (
+    "input_tokens",
+    "output_tokens",
+    "cache_read_tokens",
+    "cache_creation_tokens",
+)
 
 
 def classify(event: CaptureEvent) -> str:
@@ -62,6 +68,20 @@ class Turn:
         if self.prompt.temperature is not None:
             return self.prompt.temperature
         return self.responses[0].temperature if self.responses else None
+
+    @property
+    def usage_totals(self) -> dict[str, int] | None:
+        """Sum provider-reported usage across API calls in this prompt turn."""
+        reported = [event.usage for event in self.responses if event.usage is not None]
+        if not reported:
+            return None
+        totals = {}
+        for key in USAGE_KEYS:
+            values = [usage[key] for usage in reported if key in usage]
+            if values:
+                totals[key] = sum(values)
+        totals["api_call_count"] = len(reported)
+        return totals
 
 
 class TurnAggregator:

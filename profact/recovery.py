@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 from . import git_ops, store
@@ -78,6 +79,7 @@ def finalize(repo_root: Path, version_id: str) -> RecoveryResult:
         cursor = conn.execute(
             "UPDATE versions SET tree_after = ?, diff_ref = ?, confidence = ?, "
             "confidence_reason = COALESCE(confidence_reason, ?), "
+            "completed_at = ?, completion_source = ?, "
             "thinking_source = COALESCE(thinking_source, ?) "
             "WHERE id = ? AND type = 'prompt' AND tree_after IS NULL",
             (
@@ -85,6 +87,8 @@ def finalize(repo_root: Path, version_id: str) -> RecoveryResult:
                 diff_ref,
                 "uncertain",
                 "turn finalized after interrupted capture",
+                datetime.now(timezone.utc).isoformat(),
+                "recovery-finalized",
                 store.THINKING_NONE,
                 version.id,
             ),
@@ -111,9 +115,16 @@ def preserve(repo_root: Path, version_id: str) -> RecoveryResult:
         version = _require_dangling(conn, version_id)
         cursor = conn.execute(
             "UPDATE versions SET tree_after = tree_before, diff_ref = NULL, "
-            "confidence = ?, thinking_source = COALESCE(thinking_source, ?) "
+            "confidence = ?, completed_at = ?, completion_source = ?, "
+            "thinking_source = COALESCE(thinking_source, ?) "
             "WHERE id = ? AND type = 'prompt' AND tree_after IS NULL",
-            (INCOMPLETE_CONFIDENCE, store.THINKING_NONE, version.id),
+            (
+                INCOMPLETE_CONFIDENCE,
+                datetime.now(timezone.utc).isoformat(),
+                "recovery-preserved",
+                store.THINKING_NONE,
+                version.id,
+            ),
         )
         if cursor.rowcount != 1:
             raise RecoveryError(f"{version.id} is no longer a dangling prompt turn")

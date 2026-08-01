@@ -103,6 +103,18 @@ Claude Code makes multiple API round trips per user-visible prompt (read file â†
     version is finalized on its recorded branch and marked uncertain, while the
     new branch's ProFact HEAD is not moved.
 
+### 4b. Completion and usage telemetry
+- Prompt versions store the observed completion timestamp and source. This is a
+    wall-clock workflow duration, not model compute time; recovery sources record
+    when the interrupted row was closed.
+- Claude usage is stored only when reported by Anthropic. Per-call streaming
+    usage is cumulative within a response and is merged accordingly; usage from
+    separate API calls absorbed into one prompt turn is summed.
+- Cursor token fields remain NULL until Cursor hooks expose provider usage.
+    Missing usage is never represented as zero and is never estimated from text.
+- ProFact stores no estimated monetary cost; historical pricing and billing
+    policy are outside the version model.
+
 ### 5. File-change capture and correlation (Decision F)
 - Use `git write-tree` for before/after snapshots â€” never `git diff HEAD` or `git rev-parse HEAD` (Claude Code writes files without committing, so HEAD-based diffing loses uncommitted work).
 - **Use a temporary shadow index** (`GIT_INDEX_FILE=.profact/tmp_index`) for every snapshot. Stage the full working-directory state into this shadow index (respecting `.gitignore`), then `write-tree` from it. This captures uncommitted and untracked changes **without ever touching the user's real staging area**.

@@ -104,6 +104,19 @@ affected version `uncertain` with the reason. It does not claim which session
 wrote individual files; exact concurrent filesystem attribution would require
 isolated worktrees or per-write provenance.
 
+## Completion and token telemetry
+
+Each prompt version records when ProFact observed it closing and how it closed
+(for example `cursor-stop`, `claude-session-end`, or recovery). `profact show`
+and the TUI Overview display elapsed wall time from prompt open to observed
+completion.
+
+Claude token usage is provider-reported and summed across all API calls absorbed
+into the user prompt, including input, output, cache-read, and cache-creation
+tokens. Cursor currently does not expose trustworthy token usage through hooks,
+so those fields remain `not reported` rather than being estimated. ProFact does
+not calculate monetary cost or guess tokens from saved text.
+
 ## Interactive history
 
 `profact tui` opens a read-only history browser with a navigable DAG and tabs

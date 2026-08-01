@@ -295,6 +295,11 @@ def show(
     if version.model:
         temp = f" @ temp={version.temperature}" if version.temperature is not None else ""
         typer.echo(f"  model:    {version.model}{temp}")
+    if version.type == "prompt":
+        completed = version_detail.completion_text(version)
+        if completed:
+            typer.echo(f"  completed:{' ' * 2}{completed}")
+        typer.echo(f"  tokens:   {version_detail.usage_text(version)}")
     if version.commit_hash:
         typer.echo(f"  commit:   {version.commit_hash[:8]}")
     if detail.tags:

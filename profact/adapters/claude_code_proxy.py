@@ -35,6 +35,13 @@ _DROP_RESPONSE_HEADERS = _HOP_BY_HOP | {"content-encoding", "content-length"}
 
 Emit = Callable[[CaptureEvent], None]
 
+_USAGE_FIELDS = {
+    "input_tokens": "input_tokens",
+    "output_tokens": "output_tokens",
+    "cache_read_input_tokens": "cache_read_tokens",
+    "cache_creation_input_tokens": "cache_creation_tokens",
+}
+
 
 def build_app(emit: Emit, upstream: httpx.AsyncClient) -> Starlette:
     async def handler(request: Request) -> StreamingResponse:
@@ -145,6 +152,7 @@ class _SSEAssistantParser:
         self._buffer = ""
         self._text_parts: list[str] = []
         self._model: str | None = None
+        self._usage: dict[str, int] = {}
 
     def feed(self, chunk: bytes) -> None:
         self._buffer += chunk.decode("utf-8", errors="ignore")
@@ -164,7 +172,13 @@ class _SSEAssistantParser:
     def _consume(self, obj: dict) -> None:
         kind = obj.get("type")
         if kind == "message_start":
-            self._model = obj.get("message", {}).get("model")
+            message = obj.get("message", {})
+            self._model = message.get("model")
+            self._usage.update(_normalize_usage(message.get("usage")))
+        elif kind == "message_delta":
+            # Anthropic streaming usage is cumulative within one API response;
+            # overwrite repeated keys rather than adding them.
+            self._usage.update(_normalize_usage(obj.get("usage")))
         elif kind == "content_block_delta":
             delta = obj.get("delta", {})
             if delta.get("type") == "text_delta":
@@ -176,6 +190,7 @@ class _SSEAssistantParser:
             content_blocks=[{"type": "text", "text": "".join(self._text_parts)}],
             model=self._model,
             timestamp=_now_iso(),
+            usage=self._usage or None,
         )
 
 
@@ -210,6 +225,7 @@ def _json_response_event(body: bytes) -> CaptureEvent | None:
         content_blocks=_normalize_content(content),
         model=data.get("model"),
         timestamp=_now_iso(),
+        usage=_normalize_usage(data.get("usage")) or None,
     )
 
 
@@ -219,6 +235,17 @@ def _normalize_content(content) -> list[dict]:
     if isinstance(content, list):
         return content
     return []
+
+
+def _normalize_usage(value) -> dict[str, int]:
+    if not isinstance(value, dict):
+        return {}
+    result: dict[str, int] = {}
+    for source, target in _USAGE_FIELDS.items():
+        amount = value.get(source)
+        if isinstance(amount, int) and not isinstance(amount, bool) and amount >= 0:
+            result[target] = amount
+    return result
 
 
 def _forward_headers(headers) -> dict[str, str]:

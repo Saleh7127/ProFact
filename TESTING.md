@@ -57,6 +57,7 @@ Expected: all tests pass. Coverage by area:
 | `test_private_paths.py` | private paths never enter snapshots/diffs and survive checkout |
 | `test_privacy_audit.py` | masked historical scans, reference remediation, and unsafe-orphan cleanup |
 | `test_multi_session.py` | interleaved Cursor/Claude routing, idempotency, atomic parentage, overlap/branch warnings, migration, and session visibility |
+| `test_telemetry.py` | Cursor/recovery completion sources, null usage semantics, display parity, idempotency, and migration |
 
 ---
 

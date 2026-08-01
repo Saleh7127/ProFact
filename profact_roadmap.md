@@ -133,7 +133,10 @@ Effort/Impact are rough (Low / Med / High). ★ = strong thesis contribution.
   `status`, and `log --tests`. Foundation for effectiveness scoring and
   bug-causing-prompt analysis. ★ *Impact: High · Effort: Med.*
 - **Richer model metadata** — provider, model version, temperature, tools,
-  context size, token counts (where available). *Impact: High · Effort: Med.*
+  context size, token counts (where available). Provider-reported Claude token
+  totals, API-call count, completion timestamp/source, and wall duration are
+  implemented; unavailable Cursor usage remains explicitly unknown. ✅
+  *Impact: High · Effort: Med.*
 - **Smarter Git-commit linking** — suggest attaching a whole prompt chain to a
   commit, not just current HEAD. *Impact: High · Effort: Med.*
 - **CI provenance check** — verify generated code has prompt lineage and no
@@ -147,7 +150,9 @@ Effort/Impact are rough (Low / Med / High). ★ = strong thesis contribution.
 - **AI churn metrics** — lines repeatedly rewritten across nearby versions;
   flags unstable code / poor prompt decomposition. *Impact: High · Effort: Med.*
 - **Cost / token tracking** — tokens, latency, estimated cost per
-  version/session. *Impact: High · Effort: Med.*
+  version/session. Provider token totals and observed wall duration are
+  implemented. Estimated monetary cost is deliberately excluded because prices
+  vary by model, date, and cache tier. *Impact: High · Effort: Med.*
 - **Prompt-effectiveness score** — did a prompt help? (tests passed, sane diff
   size, not later reverted, low churn). ★ *Impact: High · Effort: High.*
 - **Model comparison** — replay equivalent prompts across models on the same
@@ -314,6 +319,9 @@ deliberately deferred.
 - [x] Reliable multi-session event routing with durable Cursor/Claude turn
   identities, idempotent hooks, atomic branch ordering, and honest overlap and
   branch-switch attribution warnings.
+- [x] Per-prompt completion timestamp/source and provider-reported Claude input,
+  output, cache, and API-call usage; no guessed Cursor tokens or mutable cost
+  estimates.
 
 ### Completed milestone — make existing history immediately useful
 

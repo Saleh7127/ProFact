@@ -35,7 +35,14 @@ CREATE TABLE IF NOT EXISTS versions (
     conversation_id TEXT,
     thinking_ref    TEXT,
     thinking_source TEXT,
-    confidence_reason TEXT
+    confidence_reason TEXT,
+    completed_at TEXT,
+    completion_source TEXT,
+    input_tokens INTEGER,
+    output_tokens INTEGER,
+    cache_read_tokens INTEGER,
+    cache_creation_tokens INTEGER,
+    api_call_count INTEGER
 );
 
 -- One HEAD per Git branch (branch-local HEADs). The legacy .profact/HEAD file
@@ -103,6 +110,13 @@ _MIGRATION_COLUMNS = (
     ("thinking_ref", "TEXT"),
     ("thinking_source", "TEXT"),
     ("confidence_reason", "TEXT"),
+    ("completed_at", "TEXT"),
+    ("completion_source", "TEXT"),
+    ("input_tokens", "INTEGER"),
+    ("output_tokens", "INTEGER"),
+    ("cache_read_tokens", "INTEGER"),
+    ("cache_creation_tokens", "INTEGER"),
+    ("api_call_count", "INTEGER"),
 )
 
 
@@ -127,6 +141,13 @@ class Version:
     thinking_ref: str | None = None
     thinking_source: str | None = None
     confidence_reason: str | None = None
+    completed_at: str | None = None
+    completion_source: str | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    cache_read_tokens: int | None = None
+    cache_creation_tokens: int | None = None
+    api_call_count: int | None = None
 
 
 @dataclass
@@ -392,6 +413,13 @@ def create_version(
     thinking_ref: str | None = None,
     thinking_source: str | None = None,
     confidence_reason: str | None = None,
+    completed_at: str | None = None,
+    completion_source: str | None = None,
+    input_tokens: int | None = None,
+    output_tokens: int | None = None,
+    cache_read_tokens: int | None = None,
+    cache_creation_tokens: int | None = None,
+    api_call_count: int | None = None,
 ) -> Version:
     if type not in VERSION_TYPES:
         raise ValueError(f"unknown version type: {type}")
@@ -417,6 +445,13 @@ def create_version(
             thinking_ref=thinking_ref,
             thinking_source=thinking_source,
             confidence_reason=confidence_reason,
+            completed_at=completed_at,
+            completion_source=completion_source,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cache_read_tokens=cache_read_tokens,
+            cache_creation_tokens=cache_creation_tokens,
+            api_call_count=api_call_count,
         )
         conn.commit()
         return version
@@ -509,6 +544,13 @@ def _insert_version(
     thinking_ref: str | None = None,
     thinking_source: str | None = None,
     confidence_reason: str | None = None,
+    completed_at: str | None = None,
+    completion_source: str | None = None,
+    input_tokens: int | None = None,
+    output_tokens: int | None = None,
+    cache_read_tokens: int | None = None,
+    cache_creation_tokens: int | None = None,
+    api_call_count: int | None = None,
 ) -> Version:
     version = Version(
         id=next_version_id(conn),
@@ -530,6 +572,13 @@ def _insert_version(
         thinking_ref=thinking_ref,
         thinking_source=thinking_source,
         confidence_reason=confidence_reason,
+        completed_at=completed_at,
+        completion_source=completion_source,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cache_read_tokens=cache_read_tokens,
+        cache_creation_tokens=cache_creation_tokens,
+        api_call_count=api_call_count,
     )
     conn.execute(
         """
@@ -537,8 +586,10 @@ def _insert_version(
             id, parent_id, type, git_branch, timestamp, prompt_ref, response_ref,
             model, temperature, diff_ref, tree_before, tree_after, commit_hash,
             confidence, generation_id, conversation_id, thinking_ref,
-            thinking_source, confidence_reason
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            thinking_source, confidence_reason, completed_at, completion_source,
+            input_tokens, output_tokens, cache_read_tokens,
+            cache_creation_tokens, api_call_count
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """,
         (
             version.id,
@@ -560,6 +611,13 @@ def _insert_version(
             version.thinking_ref,
             version.thinking_source,
             version.confidence_reason,
+            version.completed_at,
+            version.completion_source,
+            version.input_tokens,
+            version.output_tokens,
+            version.cache_read_tokens,
+            version.cache_creation_tokens,
+            version.api_call_count,
         ),
     )
     return version
@@ -928,5 +986,22 @@ def _row_to_version(row: sqlite3.Row) -> Version:
         thinking_source=row["thinking_source"] if "thinking_source" in row.keys() else None,
         confidence_reason=(
             row["confidence_reason"] if "confidence_reason" in row.keys() else None
+        ),
+        completed_at=row["completed_at"] if "completed_at" in row.keys() else None,
+        completion_source=(
+            row["completion_source"] if "completion_source" in row.keys() else None
+        ),
+        input_tokens=row["input_tokens"] if "input_tokens" in row.keys() else None,
+        output_tokens=row["output_tokens"] if "output_tokens" in row.keys() else None,
+        cache_read_tokens=(
+            row["cache_read_tokens"] if "cache_read_tokens" in row.keys() else None
+        ),
+        cache_creation_tokens=(
+            row["cache_creation_tokens"]
+            if "cache_creation_tokens" in row.keys()
+            else None
+        ),
+        api_call_count=(
+            row["api_call_count"] if "api_call_count" in row.keys() else None
         ),
     )

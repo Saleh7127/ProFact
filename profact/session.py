@@ -94,21 +94,48 @@ class CaptureSession:
         response_ref = (
             store.write_object(self.repo_root, response_text) if response_text else None
         )
+        usage = turn.usage_totals or {}
         with store.connect(self.repo_root) as conn:
             conn.execute(
                 """
                 UPDATE versions
                 SET response_ref = ?,
                     model = COALESCE(model, ?),
-                    temperature = COALESCE(temperature, ?)
+                    temperature = COALESCE(temperature, ?),
+                    input_tokens = ?,
+                    output_tokens = ?,
+                    cache_read_tokens = ?,
+                    cache_creation_tokens = ?,
+                    api_call_count = ?
                 WHERE id = ?
                 """,
-                (response_ref, turn.model, turn.temperature, version_id),
+                (
+                    response_ref,
+                    turn.model,
+                    turn.temperature,
+                    usage.get("input_tokens"),
+                    usage.get("output_tokens"),
+                    usage.get("cache_read_tokens"),
+                    usage.get("cache_creation_tokens"),
+                    usage.get("api_call_count"),
+                    version_id,
+                ),
             )
             conn.commit()
-        self._finalize(version_id)
+        self._finalize(
+            version_id,
+            completed_at=(turn.closed_at if turn.responses else None) or _now_iso(),
+            completion_source=_completion_source(turn.close_reason),
+        )
 
-    def _finalize(self, version_id: str, confidence: str | None = None) -> None:
+    def _finalize(
+        self,
+        version_id: str,
+        confidence: str | None = None,
+        *,
+        completed_at: str | None = None,
+        completion_source: str | None = None,
+    ) -> None:
         with store.connect(self.repo_root) as conn:
             version = store.get_version(conn, version_id)
             if version is None:
@@ -136,7 +163,9 @@ class CaptureSession:
                 SET tree_after = ?,
                     diff_ref = ?,
                     confidence = ?,
-                    confidence_reason = COALESCE(confidence_reason, ?)
+                    confidence_reason = COALESCE(confidence_reason, ?),
+                    completed_at = COALESCE(completed_at, ?),
+                    completion_source = COALESCE(completion_source, ?)
                 WHERE id = ?
                 """,
                 (
@@ -144,6 +173,8 @@ class CaptureSession:
                     diff_ref,
                     effective_confidence,
                     reason,
+                    completed_at,
+                    completion_source,
                     version_id,
                 ),
             )
@@ -168,6 +199,11 @@ def _response_text(event: CaptureEvent) -> str:
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _completion_source(close_reason: str | None) -> str:
+    reason = (close_reason or "session_end").replace("_", "-")
+    return f"claude-{reason}"
 
 
 def run(host: str = "127.0.0.1", port: int = 7845) -> None:

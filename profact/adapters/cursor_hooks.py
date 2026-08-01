@@ -26,6 +26,7 @@ import os
 import sqlite3
 import stat
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .. import git_ops, human_edits, store
@@ -121,9 +122,9 @@ def handle(repo_root: Path, event: dict) -> dict:
     elif name == EVENT_RESPONSE:
         _on_response(repo_root, event)
     elif name == EVENT_STOP:
-        _finalize_event(repo_root, event)
+        _finalize_event(repo_root, event, "cursor-stop")
     elif name == EVENT_SESSION_END:
-        _finalize_event(repo_root, event)
+        _finalize_event(repo_root, event, "cursor-session-end")
         with store.connect(repo_root) as conn:
             has_open_turns = bool(store.open_prompts(conn))
         if not has_open_turns:
@@ -180,7 +181,7 @@ def _on_prompt(repo_root: Path, event: dict) -> None:
     # A new prompt proves prior turns in this conversation are no longer live.
     # Other conversations remain open and are never closed by this event.
     for version in previous:
-        _finalize_version(repo_root, version.id)
+        _finalize_version(repo_root, version.id, "cursor-superseded")
 
     with store.connect(repo_root) as conn:
         if store.find_prompt_by_turn(conn, conversation_id, generation_id):
@@ -271,15 +272,19 @@ def _on_response(repo_root: Path, event: dict) -> None:
         conn.commit()
 
 
-def _finalize_event(repo_root: Path, event: dict) -> None:
+def _finalize_event(
+    repo_root: Path, event: dict, completion_source: str
+) -> None:
     with store.connect(repo_root) as conn:
         version = _resolve_prompt(repo_root, conn, event)
     if version is None:
         return
-    _finalize_version(repo_root, version.id)
+    _finalize_version(repo_root, version.id, completion_source)
 
 
-def _finalize_version(repo_root: Path, version_id: str) -> bool:
+def _finalize_version(
+    repo_root: Path, version_id: str, completion_source: str
+) -> bool:
     """Finalize one exact turn with compare-and-set idempotency."""
     with store.connect(repo_root) as conn:
         version = store.get_version(conn, version_id)
@@ -311,6 +316,7 @@ def _finalize_version(repo_root: Path, version_id: str) -> bool:
         cursor = conn.execute(
             "UPDATE versions SET tree_after = ?, diff_ref = ?, confidence = ?, "
             "confidence_reason = COALESCE(confidence_reason, ?), "
+            "completed_at = ?, completion_source = ?, "
             "thinking_source = COALESCE(thinking_source, ?) "
             "WHERE id = ? AND tree_after IS NULL",
             (
@@ -318,6 +324,8 @@ def _finalize_version(repo_root: Path, version_id: str) -> bool:
                 diff_ref,
                 confidence,
                 reason,
+                datetime.now(timezone.utc).isoformat(),
+                completion_source,
                 store.THINKING_NONE,
                 version.id,
             ),

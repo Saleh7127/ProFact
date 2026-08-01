@@ -162,6 +162,12 @@ def overview_text(detail: version_detail.VersionDetail) -> str:
         f"Finalized: {'yes' if version.tree_after is not None else 'no (open turn)'}",
         f"Confidence: {version.confidence or 'unknown'}",
     ]
+    completed = version_detail.completion_text(version)
+    if completed:
+        lines.append(f"Completed: {completed}")
+    usage = version_detail.usage_text(version)
+    if usage:
+        lines.append(f"Tokens: {usage}")
     if version.confidence_reason:
         lines.append(f"Confidence reason: {version.confidence_reason}")
     if version.model:

@@ -11,6 +11,7 @@ class CaptureEvent:
     model: str | None = None
     temperature: float | None = None
     timestamp: str = ""
+    usage: dict[str, int] | None = None
 
 
 class CaptureAdapter(Protocol):
