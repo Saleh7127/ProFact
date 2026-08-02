@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -24,9 +25,16 @@ class CaptureSession:
     while the watcher thread drives settle.
     """
 
-    def __init__(self, repo_root: Path, correlation_window: float = CORRELATION_WINDOW) -> None:
+    def __init__(
+        self,
+        repo_root: Path,
+        correlation_window: float = CORRELATION_WINDOW,
+        *,
+        session_id: str | None = None,
+    ) -> None:
         self.repo_root = repo_root
         self.correlation_window = correlation_window
+        self.session_id = session_id or f"claude-{uuid.uuid4().hex}"
         self.aggregator = TurnAggregator(on_open=self._on_open, on_close=self._on_close)
         self._lock = threading.RLock()
         self._version_by_turn: dict[int, str] = {}
@@ -59,24 +67,21 @@ class CaptureSession:
     def _on_open(self, turn: Turn) -> None:
         branch = git_ops.current_branch(self.repo_root)
         tree_before = git_ops.write_tree(self.repo_root)
-        parent_id = store.read_head(self.repo_root, branch)
         prompt_ref = store.write_object(self.repo_root, turn.prompt_text)
-        with store.connect(self.repo_root) as conn:
-            version = store.create_version(
-                conn,
-                type="prompt",
-                git_branch=branch,
-                parent_id=parent_id,
-                tree_before=tree_before,
-                prompt_ref=prompt_ref,
-                model=turn.model,
-                temperature=turn.temperature,
-            )
+        version, _created = store.create_prompt_at_head(
+            self.repo_root,
+            git_branch=branch,
+            tree_before=tree_before,
+            prompt_ref=prompt_ref,
+            model=turn.model,
+            temperature=turn.temperature,
+            conversation_id=self.session_id,
+            generation_id=str(turn.index),
+        )
         self._version_by_turn[turn.index] = version.id
         self._open_version_id = version.id
         self._last_ai_version = version.id
         self._turn_open = True
-        store.write_head(self.repo_root, branch, version.id)
 
     def _on_close(self, turn: Turn) -> None:
         version_id = self._version_by_turn.pop(turn.index, None)
@@ -89,21 +94,48 @@ class CaptureSession:
         response_ref = (
             store.write_object(self.repo_root, response_text) if response_text else None
         )
+        usage = turn.usage_totals or {}
         with store.connect(self.repo_root) as conn:
             conn.execute(
                 """
                 UPDATE versions
                 SET response_ref = ?,
                     model = COALESCE(model, ?),
-                    temperature = COALESCE(temperature, ?)
+                    temperature = COALESCE(temperature, ?),
+                    input_tokens = ?,
+                    output_tokens = ?,
+                    cache_read_tokens = ?,
+                    cache_creation_tokens = ?,
+                    api_call_count = ?
                 WHERE id = ?
                 """,
-                (response_ref, turn.model, turn.temperature, version_id),
+                (
+                    response_ref,
+                    turn.model,
+                    turn.temperature,
+                    usage.get("input_tokens"),
+                    usage.get("output_tokens"),
+                    usage.get("cache_read_tokens"),
+                    usage.get("cache_creation_tokens"),
+                    usage.get("api_call_count"),
+                    version_id,
+                ),
             )
             conn.commit()
-        self._finalize(version_id)
+        self._finalize(
+            version_id,
+            completed_at=(turn.closed_at if turn.responses else None) or _now_iso(),
+            completion_source=_completion_source(turn.close_reason),
+        )
 
-    def _finalize(self, version_id: str, confidence: str | None = None) -> None:
+    def _finalize(
+        self,
+        version_id: str,
+        confidence: str | None = None,
+        *,
+        completed_at: str | None = None,
+        completion_source: str | None = None,
+    ) -> None:
         with store.connect(self.repo_root) as conn:
             version = store.get_version(conn, version_id)
             if version is None:
@@ -111,15 +143,40 @@ class CaptureSession:
             tree_after = git_ops.write_tree(self.repo_root)
             diff = git_ops.diff_trees(self.repo_root, version.tree_before, tree_after)
             diff_ref = store.write_object(self.repo_root, diff) if diff.strip() else None
+            open_now = store.open_prompts(conn)
+            overlap = any(item.id != version.id for item in open_now)
+            branch_changed = git_ops.current_branch(self.repo_root) != version.git_branch
+            reason = None
+            if overlap:
+                reason = "overlapping sessions shared one working tree"
+                store.mark_versions_uncertain(
+                    conn, [item.id for item in open_now], reason
+                )
+            elif branch_changed:
+                reason = "git branch changed while turn was open"
+            effective_confidence = confidence or version.confidence
+            if overlap or branch_changed:
+                effective_confidence = "uncertain"
             conn.execute(
                 """
                 UPDATE versions
                 SET tree_after = ?,
                     diff_ref = ?,
-                    confidence = COALESCE(?, confidence)
+                    confidence = ?,
+                    confidence_reason = COALESCE(confidence_reason, ?),
+                    completed_at = COALESCE(completed_at, ?),
+                    completion_source = COALESCE(completion_source, ?)
                 WHERE id = ?
                 """,
-                (tree_after, diff_ref, confidence, version_id),
+                (
+                    tree_after,
+                    diff_ref,
+                    effective_confidence,
+                    reason,
+                    completed_at,
+                    completion_source,
+                    version_id,
+                ),
             )
             conn.commit()
 
@@ -142,6 +199,11 @@ def _response_text(event: CaptureEvent) -> str:
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _completion_source(close_reason: str | None) -> str:
+    reason = (close_reason or "session_end").replace("_", "-")
+    return f"claude-{reason}"
 
 
 def run(host: str = "127.0.0.1", port: int = 7845) -> None:

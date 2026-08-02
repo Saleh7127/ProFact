@@ -12,7 +12,12 @@ When developing with Claude Code, a developer iterates through many prompts to b
 
 Every time you send a prompt to Claude Code, `profact` records the **prompt text, the model configuration, and the exact file changes that resulted**, storing them together as a single **version**. You can move backward and forward through this prompt-driven history like Git commits — except the unit of history is intent + its result.
 
-**MVP scope:** single user, local machine, one active session at a time. The project being versioned is itself a Git repository. Two capture adapters are in scope:
+**Scope:** single user and local machine. The original MVP assumed one active
+session; the current implementation routes multiple Cursor conversations and
+Claude proxy launches by durable session/turn identity. Sessions still share
+one working tree, so overlapping file intervals are preserved but explicitly
+marked `confidence='uncertain'` rather than assigned to one agent. The project
+being versioned is itself a Git repository. Two capture adapters are in scope:
 - **Cursor (primary)** — captured via **Cursor Hooks** (`beforeSubmitPrompt`, `afterAgentThought`, `afterAgentResponse`, `afterFileEdit`, `sessionStart`/`sessionEnd`). This matches how the tool is actually used and gives explicit turn boundaries + exact edit attribution. `afterAgentThought` records the model's reasoning ("thinking") when a reasoning model emits it, so a version is a `(prompt → reasoning → response → diff)` unit; turns with no thinking are stamped `thinking_source = 'none'`.
 - **Claude Code (secondary, already built)** — captured via the local HTTP proxy (`ANTHROPIC_BASE_URL`). Kept as a working second adapter to prove the capture interface generalizes.
 
@@ -79,6 +84,36 @@ Claude Code makes multiple API round trips per user-visible prompt (read file �
 - A request is a **continuation** of the current open version (do not create a new version) if the newly appended message has role `user` but contains **only** `tool_result` content blocks (Claude Code feeding tool output back to the model).
 - When the session ends or goes idle for 60s, finalize whatever version is still open.
 - **Validate against reality before locking the parser:** capture a small, anonymized fixture set from real Claude Code traffic (keep roles and content-block types; strip prompt text, file names, secrets, responses) and confirm the rule holds. If the real payload shape differs, update this rule and the fixtures first — do not guess.
+
+### 4a. Multiple capture sessions
+- Cursor turns are identified by `(conversation_id, generation_id)` and Claude
+    turns by a generated per-launch session id plus turn index. Prompt, thought,
+    response, stop, and late events route to that durable version rather than to
+    whichever version is currently HEAD.
+- Opening a prompt and advancing branch HEAD is one SQLite transaction. Duplicate
+    prompt/stop deliveries are idempotent, and concurrent version ids are
+    serialized.
+- Separate sessions share one branch-local DAG and are ordered by prompt-open
+    transaction. ProFact does not create per-session HEADs because that would
+    imply isolated filesystems that do not exist.
+- If two turns overlap in one working tree, both remain navigable but carry
+    `confidence='uncertain'` with a stored overlap reason. The diff describes the
+    shared time interval; exact per-session file authorship is not claimed.
+- A Git branch switch during an open turn does not lose routing: the original
+    version is finalized on its recorded branch and marked uncertain, while the
+    new branch's ProFact HEAD is not moved.
+
+### 4b. Completion and usage telemetry
+- Prompt versions store the observed completion timestamp and source. This is a
+    wall-clock workflow duration, not model compute time; recovery sources record
+    when the interrupted row was closed.
+- Claude usage is stored only when reported by Anthropic. Per-call streaming
+    usage is cumulative within a response and is merged accordingly; usage from
+    separate API calls absorbed into one prompt turn is summed.
+- Cursor token fields remain NULL until Cursor hooks expose provider usage.
+    Missing usage is never represented as zero and is never estimated from text.
+- ProFact stores no estimated monetary cost; historical pricing and billing
+    policy are outside the version model.
 
 ### 5. File-change capture and correlation (Decision F)
 - Use `git write-tree` for before/after snapshots — never `git diff HEAD` or `git rev-parse HEAD` (Claude Code writes files without committing, so HEAD-based diffing loses uncommitted work).
@@ -199,6 +234,8 @@ profact bisect --good <id> [--bad <id>] -- <cmd>  # binary-search the lineage fo
 profact test [--version <id>] -- <cmd>  # run a test command; record pass/fail/error on the version (HEAD by default); shown in show/status/log --tests
 profact checkout <id> [-f]      # §8 — auto-checkpoint, restore tree, move HEAD; preserves ignored files; prompts before a cross-branch target (--force skips)
 profact status                  # current HEAD id, branch, dirty-vs-HEAD, any open/in-progress version
+profact recover [<id> (--finalize|--preserve)]  # inspect/close interrupted prompt turns; never deletes captured intent
+profact privacy scan [--fix]    # masked audit/redaction of stored text objects; private paths configured in profact.toml
 profact doctor [--fix]          # report/prune history artifacts: phantom checkpoints, orphaned objects (dangling turns report-only)
 ```
 
@@ -215,7 +252,12 @@ profact start --claude          # Claude mode: set ANTHROPIC_BASE_URL, launch pr
 ```
 Build `adapters/cursor_hooks.py` + a hidden `profact hook` entry point Cursor calls per event (event name read from the stdin payload). Map hook events into the store: `beforeSubmitPrompt` opens a turn + snapshots `tree_before` + advances HEAD; `afterAgentThought` appends the model's reasoning (aggregated across blocks) and marks `thinking_source = 'captured'`; `afterAgentResponse` records the response text; `stop`/`sessionEnd` snapshot `tree_after` + diff, stamp `thinking_source = 'none'` if no thinking arrived, and finalize. `afterFileEdit` is not wired (diffs come from tree snapshots; reserved for future per-edit attribution). No turn-boundary heuristic and no time-window watcher are needed on this path.
 
-**Hook process model — LOCKED: stateless hooks + DB (no daemon).** Cursor hooks are short-lived processes, so each `profact hook <event>` invocation is a small direct `store.py` write. The only state carried between events is which version is currently open (HEAD + the row whose `tree_after` is null). SQLite (WAL) serializes concurrent `afterFileEdit` writes; crash-safety is free since the DB always reflects completed events.
+**Hook process model — LOCKED: stateless hooks + DB (no daemon).** Cursor hooks
+are short-lived processes, so each `profact hook <event>` invocation is a small
+direct `store.py` write. State between events is the prompt row keyed by Cursor
+conversation/generation identity; legacy payloads without ids fall back to the
+branch's open HEAD. SQLite WAL, bounded lock waits, atomic prompt/HEAD writes,
+and compare-and-set finalization serialize concurrent hook processes.
 
 **Test — the actual goal of this whole project:**
 ```bash

@@ -9,7 +9,7 @@ from pathlib import Path
 
 import typer
 
-from . import git_ops, store, testrunner
+from . import git_ops, graph_layout, store, testrunner
 
 _GRAPH_GUTTER = 8
 
@@ -399,6 +399,8 @@ def _row_detail(
         details.append(f"thinking: {version.thinking_source or 'unknown'}")
     if version.confidence and version.confidence != "high":
         details.append(f"confidence: {version.confidence}")
+        if version.confidence_reason:
+            details.append(f"reason: {_short(version.confidence_reason, 52)}")
 
     if tests is not None:
         result = tests.get(version.id)
@@ -452,64 +454,22 @@ def _print_graph(
     filtered_out: int = 0,
     shape_versions: list[store.Version] | None = None,
 ) -> None:
-    ids = {version.id for version in versions}
     head_label = f"  (HEAD = {head})" if head else ""
     title = "HEAD ancestry graph" if path_mode else "DAG"
     typer.echo(f"{title} for branch '{branch}'{head_label}\n")
 
-    lanes: list[str | None] = []
-    for version in versions:
-        if version.id in lanes:
-            col = lanes.index(version.id)
-        elif None in lanes:
-            col = lanes.index(None)
-            lanes[col] = version.id
-        else:
-            lanes.append(version.id)
-            col = len(lanes) - 1
-
-        node = "".join(
-            "*" if index == col else ("|" if lane is not None else " ")
-            for index, lane in enumerate(lanes)
-        )
+    for row in graph_layout.layout(versions):
+        version = row.version
         typer.echo(
-            f"{node:<{_GRAPH_GUTTER}} "
+            f"{row.node:<{_GRAPH_GUTTER}} "
             f"{_row_text(repo_root, version, head, tests, tags)}"
         )
-        detail_lanes = list(lanes)
-        if version.parent_id not in ids:
-            detail_lanes[col] = None
-        continuation = "".join(
-            "|" if lane is not None else " " for lane in detail_lanes
-        )
         typer.echo(
-            f"{continuation:<{_GRAPH_GUTTER}} "
+            f"{row.continuation:<{_GRAPH_GUTTER}} "
             f"{_row_detail(repo_root, version, tests)}"
         )
-
-        parent = version.parent_id if version.parent_id in ids else None
-        merge: tuple[int, int] | None = None
-        if parent is None:
-            lanes[col] = None
-        elif parent in lanes and lanes.index(parent) != col:
-            other = lanes.index(parent)
-            keep, drop = min(col, other), max(col, other)
-            lanes[keep] = parent
-            lanes[drop] = None
-            merge = (keep, drop)
-        else:
-            lanes[col] = parent
-
-        if merge is not None:
-            keep, drop = merge
-            connector = "".join(
-                "/" if index == drop else ("|" if lanes[index] is not None or index == keep else " ")
-                for index in range(len(lanes))
-            )
-            typer.echo(connector)
-
-        while lanes and lanes[-1] is None:
-            lanes.pop()
+        if row.connector is not None:
+            typer.echo(row.connector)
 
     typer.echo("")
     if path_mode:
@@ -540,23 +500,15 @@ def _log_count_summary(shown: int, omitted: int, filtered_out: int) -> str:
 def _print_history_shape(
     versions: list[store.Version], head: str | None, *, prefix: str = ""
 ) -> None:
-    ids = {version.id for version in versions}
-    child_count: dict[str, int] = {}
-    for version in versions:
-        if version.parent_id in ids:
-            child_count[version.parent_id] = child_count.get(version.parent_id, 0) + 1
+    shape = graph_layout.history_shape(versions)
     tips = [
-        version.id + (" (HEAD)" if version.id == head else "")
-        for version in versions
-        if child_count.get(version.id, 0) == 0
-    ]
-    branch_points = [
-        version.id for version in versions if child_count.get(version.id, 0) > 1
+        version_id + (" (HEAD)" if version_id == head else "")
+        for version_id in shape.tips
     ]
     typer.echo(f"{prefix}tips: {', '.join(tips) if tips else '-'}")
     typer.echo(
         f"{prefix}branch points: "
-        f"{', '.join(branch_points) if branch_points else '-'}"
+        f"{', '.join(shape.branch_points) if shape.branch_points else '-'}"
     )
 
 

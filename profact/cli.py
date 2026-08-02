@@ -7,12 +7,25 @@ from pathlib import Path
 
 import typer
 
+from . import config
 from . import checkout as checkout_service
 from . import doctor as doctor_service
 from . import health as health_service
-from . import git_ops, human_edits, log_view, store, testrunner
+from . import privacy_audit as privacy_audit_service
+from . import recovery as recovery_service
+from . import (
+    git_ops,
+    human_edits,
+    log_view,
+    status_view,
+    store,
+    testrunner,
+    version_detail,
+)
 
 app = typer.Typer(help="Prompt-native version control for AI-assisted development.")
+privacy_app = typer.Typer(help="Inspect and enforce repository privacy policy.")
+app.add_typer(privacy_app, name="privacy")
 
 
 def _resolve_repo_root() -> Path:
@@ -81,6 +94,13 @@ def start(
     """Start capture. Default installs Cursor hooks; --claude runs the Claude proxy."""
     repo_root = _resolve_repo_root()
     _require_init(repo_root)
+    dangling_count = len(recovery_service.audit(repo_root))
+    if dangling_count:
+        typer.echo(
+            f"note: {dangling_count} unfinished prompt turn(s) found; "
+            "run `profact recover` if capture was interrupted",
+            err=True,
+        )
 
     if claude:
         from . import session
@@ -255,12 +275,19 @@ def show(
         typer.echo(f"error: no such version or tag '{version_id}'", err=True)
         raise typer.Exit(1)
 
+    head = store.read_head(repo_root, branch, seed=False)
+    detail = version_detail.load(
+        repo_root,
+        version,
+        head_id=head,
+        tags=tuple(tags),
+        test_result=test_result,
+    )
     if section is not None:
-        _echo_show_section(repo_root, version, section)
+        typer.echo(detail.section(section))
         return
 
-    head = store.read_head(repo_root, branch, seed=False)
-    is_head = " (HEAD)" if version.id == head else ""
+    is_head = " (HEAD)" if detail.is_head else ""
     typer.echo(f"version {version.id}{is_head}  [{version.type}]")
     typer.echo(f"  branch:   {version.git_branch}")
     typer.echo(f"  parent:   {version.parent_id or '-'}")
@@ -268,34 +295,46 @@ def show(
     if version.model:
         temp = f" @ temp={version.temperature}" if version.temperature is not None else ""
         typer.echo(f"  model:    {version.model}{temp}")
+    if version.type == "prompt":
+        completed = version_detail.completion_text(version)
+        if completed:
+            typer.echo(f"  completed:{' ' * 2}{completed}")
+        typer.echo(f"  tokens:   {version_detail.usage_text(version)}")
     if version.commit_hash:
         typer.echo(f"  commit:   {version.commit_hash[:8]}")
-    if tags:
-        typer.echo(f"  tags:     {', '.join(tags)}")
-    if test_result:
-        typer.echo(f"  test:     {testrunner.format_result(test_result)}")
-    if version.confidence and version.confidence != "high":
+    if detail.tags:
+        typer.echo(f"  tags:     {', '.join(detail.tags)}")
+    if detail.test_result:
+        typer.echo(f"  test:     {testrunner.format_result(detail.test_result)}")
+    if version.confidence == recovery_service.INCOMPLETE_CONFIDENCE:
         typer.echo(
-            f"  warning:  confidence is '{version.confidence}' — "
+            "  warning:  capture ended before its artifact was recovered; "
+            "working-tree changes were not attributed to this prompt"
+        )
+    elif version.confidence and version.confidence != "high":
+        reason = version.confidence_reason or (
             "files changed concurrently with this turn; attribution may be imprecise"
         )
+        typer.echo(f"  warning:  confidence is '{version.confidence}' — {reason}")
 
-    prompt = store.read_object(repo_root, version.prompt_ref) if version.prompt_ref else None
-    if prompt:
+    if detail.prompt:
         typer.echo("\nprompt:")
-        typer.echo(_indent(prompt))
+        typer.echo(_indent(detail.prompt))
 
-    _echo_thinking(repo_root, version)
+    if detail.thinking:
+        typer.echo("\nthinking:")
+        typer.echo(_indent(detail.thinking))
+    elif version.thinking_source == store.THINKING_NONE:
+        typer.echo("\nthinking:")
+        typer.echo(_indent(version_detail.NO_THINKING_PLACEHOLDER))
 
-    response = store.read_object(repo_root, version.response_ref) if version.response_ref else None
-    if response:
+    if detail.response:
         typer.echo("\nresponse:")
-        typer.echo(_indent(response))
+        typer.echo(_indent(detail.response))
 
-    diff = store.read_object(repo_root, version.diff_ref) if version.diff_ref else None
     typer.echo("\ndiff:")
-    if diff:
-        typer.echo(diff)
+    if detail.diff:
+        typer.echo(detail.diff)
     else:
         typer.echo("  (no file changes)")
 
@@ -754,36 +793,32 @@ def status() -> None:
     """Show current HEAD, branch, and whether the working tree is dirty."""
     repo_root = _resolve_repo_root()
     _require_init(repo_root)
-    branch = git_ops.current_branch(repo_root)
-    head_id = store.read_head(repo_root, branch, seed=False)
+    report = status_view.inspect(repo_root)
 
-    typer.echo(f"branch:  {branch}")
-    if head_id is None:
+    typer.echo(f"branch:  {report.branch}")
+    if report.head_id is None:
         typer.echo("HEAD:    (none yet)")
+        _echo_open_turns(report)
         return
 
-    with store.connect(repo_root) as conn:
-        head = store.get_version(conn, head_id)
-        count = len(store.list_branch_versions(conn, branch, head=head_id))
-        test_result = store.get_test_result(conn, head_id)
-
-    if head is None:
-        typer.echo(f"HEAD:    {head_id} (missing from store)")
+    if report.head is None:
+        typer.echo(f"HEAD:    {report.head_id} (missing from store)")
+        _echo_open_turns(report)
         return
 
     typer.echo(
-        f"HEAD:    {head.id} [{head.type}] {log_view.summary(repo_root, head)}"
+        f"HEAD:    {report.head.id} [{report.head.type}] "
+        f"{log_view.summary(repo_root, report.head)}"
     )
-    typer.echo(f"versions on branch: {count}")
-    if test_result:
-        typer.echo(f"tests:   {testrunner.format_result(test_result)}")
+    typer.echo(f"versions on branch: {report.visible_versions}")
+    if report.test_result:
+        typer.echo(f"tests:   {testrunner.format_result(report.test_result)}")
+    _echo_open_turns(report)
 
-    head_tree = head.tree_after or head.tree_before
-    current_tree = git_ops.write_tree(repo_root)
-    if current_tree == head_tree:
-        typer.echo("working tree: clean (matches HEAD)")
-    else:
+    if report.dirty:
         typer.echo("working tree: dirty (differs from HEAD — uncommitted changes present)")
+    else:
+        typer.echo("working tree: clean (matches HEAD)")
 
 
 @app.command()
@@ -792,6 +827,143 @@ def health() -> None:
     repo_root = _resolve_repo_root()
     _require_init(repo_root)
     typer.echo(health_service.render(health_service.analyze(repo_root)))
+
+
+@app.command()
+def tui() -> None:
+    """Browse captured history in the interactive terminal UI."""
+    repo_root = _resolve_repo_root()
+    _require_init(repo_root)
+    from .tui.app import run
+
+    run(repo_root)
+
+
+@app.command()
+def recover(
+    version_id: str = typer.Argument(
+        None, help="Dangling version id, tag, or HEAD. Omit to list recoverable turns."
+    ),
+    finalize: bool = typer.Option(
+        False,
+        "--finalize",
+        help="Adopt the current working tree as this turn's artifact.",
+    ),
+    preserve: bool = typer.Option(
+        False,
+        "--preserve",
+        help="Close incomplete without attributing current files to the prompt.",
+    ),
+) -> None:
+    """Inspect or explicitly recover prompt turns interrupted before finalization."""
+    repo_root = _resolve_repo_root()
+    _require_init(repo_root)
+
+    if finalize and preserve:
+        typer.echo("error: --finalize and --preserve are mutually exclusive", err=True)
+        raise typer.Exit(2)
+    if version_id is None:
+        if finalize or preserve:
+            typer.echo("error: recovery action requires a version id", err=True)
+            raise typer.Exit(2)
+        candidates = recovery_service.audit(repo_root)
+        if not candidates:
+            typer.echo("No dangling prompt turns to recover.")
+            return
+        typer.echo("Dangling prompt turns:")
+        for candidate in candidates:
+            version = candidate.version
+            head = " HEAD" if candidate.is_branch_head else ""
+            finalize_label = "yes" if candidate.can_finalize else "no"
+            typer.echo(
+                f"  {version.id}  branch={version.git_branch}{head}  "
+                f"session={status_view.session_label(version)}  "
+                f"finalize={finalize_label}  {log_view.summary(repo_root, version)}"
+            )
+        typer.echo(
+            "\nUse `profact recover <id> --finalize` for the current branch HEAD,"
+        )
+        typer.echo(
+            "or `profact recover <id> --preserve` to close it incomplete "
+            "without changing files."
+        )
+        return
+
+    if not finalize and not preserve:
+        typer.echo(
+            "error: choose --finalize or --preserve (run `profact recover` to inspect)",
+            err=True,
+        )
+        raise typer.Exit(2)
+
+    branch = git_ops.current_branch(repo_root)
+    with store.connect(repo_root) as conn:
+        resolved_id = _resolve_version_token(repo_root, conn, branch, version_id)
+    target_id = resolved_id or version_id
+    try:
+        result = (
+            recovery_service.finalize(repo_root, target_id)
+            if finalize
+            else recovery_service.preserve(repo_root, target_id)
+        )
+    except recovery_service.RecoveryError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(1)
+
+    if result.action == "finalized":
+        typer.echo(
+            f"finalized {result.version.id} from the current working tree "
+            "with uncertain attribution"
+        )
+    else:
+        typer.echo(
+            f"preserved {result.version.id} as incomplete; working files were unchanged"
+        )
+
+
+@privacy_app.command("scan")
+def privacy_scan(
+    fix: bool = typer.Option(
+        False,
+        "--fix",
+        help="Rewrite referenced objects with redacted content.",
+    ),
+) -> None:
+    """Scan stored prompts, reasoning, responses, diffs, and test output."""
+    repo_root = _resolve_repo_root()
+    _require_init(repo_root)
+    try:
+        report = privacy_audit_service.scan(repo_root, fix=fix)
+    except config.ConfigError as exc:
+        typer.echo(f"error: invalid profact.toml: {exc}", err=True)
+        raise typer.Exit(2)
+
+    if not report.findings:
+        typer.echo(
+            f"No stored secrets detected in {report.scanned_objects} object(s)."
+        )
+        return
+
+    typer.echo(
+        f"Detected {len(report.findings)} secret occurrence(s) in stored history:"
+    )
+    for finding in report.findings:
+        typer.echo(
+            f"  {finding.version_id}  {finding.section}  {finding.rule}  "
+            f"line {finding.line}: {finding.masked_excerpt}"
+        )
+    if fix:
+        typer.echo(
+            f"\nupdated {report.updated_references} reference(s) across "
+            f"{report.replaced_objects} object(s) and removed "
+            f"{report.removed_unsafe_objects} unsafe original/orphan object(s)"
+        )
+    else:
+        typer.echo("\nrun `profact privacy scan --fix` to redact these objects")
+    typer.echo(
+        "note: this scans ProFact's object store; existing Git commits/objects "
+        "are outside its scope"
+    )
 
 
 @app.command()
@@ -821,7 +993,9 @@ def doctor(
     if not fix:
         if report.has_safe_repairs:
             typer.echo("\nrun `profact doctor --fix` to prune the safe-to-remove items above")
-        else:
+        if report.dangling_open_turns:
+            typer.echo("\nrun `profact recover` to inspect unfinished prompt turns")
+        elif not report.has_safe_repairs:
             typer.echo("\nnothing to repair.")
         return
 
@@ -835,8 +1009,7 @@ def doctor(
     if report.dangling_open_turns:
         typer.echo(
             f"left {len(report.dangling_open_turns)} dangling open turn(s) "
-            "untouched (real work; "
-            "they finalize on the next prompt)."
+            "untouched (real work; run `profact recover`)."
         )
 
 
@@ -844,6 +1017,20 @@ def _require_init(repo_root: Path) -> None:
     if not store.is_initialized(repo_root):
         typer.echo("error: profact is not initialized; run `profact init` first", err=True)
         raise typer.Exit(1)
+
+
+def _echo_open_turns(report: status_view.StatusReport) -> None:
+    if not report.open_turns:
+        return
+    noun = "turn" if len(report.open_turns) == 1 else "turns"
+    labels = ", ".join(
+        f"{version.id} ({status_view.session_label(version)})"
+        for version in report.open_turns
+    )
+    typer.echo(
+        f"capture: {len(report.open_turns)} open {noun}: {labels} "
+        "(run `profact recover` if capture was interrupted)"
+    )
 
 
 def _resolve_version_token(
@@ -867,70 +1054,6 @@ def _tag_name_error(name: str) -> str | None:
 
 def _indent(text: str, prefix: str = "  ") -> str:
     return "\n".join(prefix + line for line in text.splitlines())
-
-
-_NO_THINKING_PLACEHOLDER = (
-    "(no reasoning captured — the model has no thinking capability, "
-    "or none was emitted for this turn)"
-)
-
-
-def _echo_thinking(repo_root: Path, version: store.Version) -> None:
-    """Print the model's reasoning for a version, or an explicit placeholder.
-
-    Only prompt turns carry reasoning; anchors/checkpoints/human edits have no
-    ``thinking_source`` and are skipped silently.
-    """
-    thinking = (
-        store.read_object(repo_root, version.thinking_ref)
-        if version.thinking_ref
-        else None
-    )
-    if thinking:
-        typer.echo("\nthinking:")
-        typer.echo(_indent(thinking))
-    elif version.thinking_source == store.THINKING_NONE:
-        typer.echo("\nthinking:")
-        typer.echo(_indent(_NO_THINKING_PLACEHOLDER))
-
-
-def _echo_show_section(
-    repo_root: Path, version: store.Version, section: str
-) -> None:
-    """Print one captured section without report headings or metadata."""
-    if section == "prompt":
-        value = (
-            store.read_object(repo_root, version.prompt_ref)
-            if version.prompt_ref
-            else None
-        )
-        typer.echo(value if value else "(no prompt recorded)")
-    elif section == "thinking":
-        value = (
-            store.read_object(repo_root, version.thinking_ref)
-            if version.thinking_ref
-            else None
-        )
-        if value:
-            typer.echo(value)
-        elif version.thinking_source == store.THINKING_NONE:
-            typer.echo(_NO_THINKING_PLACEHOLDER)
-        else:
-            typer.echo("(no reasoning recorded)")
-    elif section == "response":
-        value = (
-            store.read_object(repo_root, version.response_ref)
-            if version.response_ref
-            else None
-        )
-        typer.echo(value if value else "(no response recorded)")
-    else:
-        value = (
-            store.read_object(repo_root, version.diff_ref)
-            if version.diff_ref
-            else None
-        )
-        typer.echo(value if value else "(no file changes)")
 
 
 def _short(text: str, length: int = 72) -> str:

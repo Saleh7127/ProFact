@@ -18,6 +18,7 @@ cd your-repo
 profact init              # set up profact in the current Git repo
 profact start             # capture Cursor via hooks (default)
 profact start --claude    # or capture Claude Code via a local proxy
+profact tui               # browse the captured history interactively
 ```
 
 ## Commands
@@ -38,7 +39,94 @@ profact start --claude    # or capture Claude Code via a local proxy
 | `profact note <commit>` | Annotate a Git commit with its version |
 | `profact status` | Show capture and HEAD status |
 | `profact health` | Summarize captured activity, tests, churn, and history attention |
+| `profact tui` | Browse captured history in an interactive terminal UI |
+| `profact recover` | Inspect and recover prompt turns interrupted before finalization |
+| `profact privacy scan` | Report masked secrets in stored history (`--fix` redacts them) |
 | `profact doctor` | Check (and `--fix`) the profact store |
+
+## Crash recovery
+
+If Cursor, Claude, or the machine stops during a turn, inspect it explicitly:
+
+```sh
+profact recover
+profact recover v13 --finalize  # current branch HEAD: adopt the current tree
+profact recover v13 --preserve  # close incomplete; leave working files untouched
+```
+
+Recovered finalization is marked `uncertain` because post-crash edits cannot be
+distinguished reliably. Preserve keeps the prompt/response record, records no
+artifact, and lets current changes be captured separately with `profact
+snapshot`. ProFact does not delete a crashed prompt: destructive discard would
+contradict its immutable, never-lose-work history model.
+
+## Privacy controls
+
+High-precision secret redaction is enabled by default for newly stored prompts,
+reasoning, responses, diffs, and test output. Configure repository-specific
+rules in an optional, commit-safe `profact.toml`:
+
+```toml
+[privacy]
+private_paths = [".env", "secrets/**", "customer-data/"]
+redact_patterns = ["INTERNAL-[0-9]{8}"]
+```
+
+Private paths never enter ProFact snapshots or diffs, are left untouched by
+ProFact checkout, and remain available to normal Git if deliberately tracked.
+`profact.toml` itself is never restored by ProFact checkout, preventing time
+travel from silently weakening the active policy.
+
+Audit history captured before privacy controls were enabled:
+
+```sh
+profact privacy scan
+profact privacy scan --fix
+```
+
+Reports contain masked excerpts only. `--fix` updates referenced ProFact
+objects and removes unsafe unreferenced originals. Existing Git commits and Git
+objects are not rewritten; remove secrets from Git history separately when
+needed.
+
+## Multiple capture sessions
+
+ProFact routes concurrent Cursor events by `conversation_id` and
+`generation_id`; each Claude proxy launch receives its own durable session id.
+Duplicate prompt/stop hooks are idempotent, late responses return to their
+original turn, and concurrent prompt opens advance branch HEAD atomically.
+`profact status` and `profact recover` identify every open session on the
+branch. Run simultaneous Claude launches on distinct `--port` values.
+
+All sessions still share the repository's working tree. If their open intervals
+overlap, ProFact preserves each prompt/response and snapshot but marks every
+affected version `uncertain` with the reason. It does not claim which session
+wrote individual files; exact concurrent filesystem attribution would require
+isolated worktrees or per-write provenance.
+
+## Completion and token telemetry
+
+Each prompt version records when ProFact observed it closing and how it closed
+(for example `cursor-stop`, `claude-session-end`, or recovery). `profact show`
+and the TUI Overview display elapsed wall time from prompt open to observed
+completion.
+
+Claude token usage is provider-reported and summed across all API calls absorbed
+into the user prompt, including input, output, cache-read, and cache-creation
+tokens. Cursor currently does not expose trustworthy token usage through hooks,
+so those fields remain `not reported` rather than being estimated. ProFact does
+not calculate monetary cost or guess tokens from saved text.
+
+## Interactive history
+
+`profact tui` opens a read-only history browser with a navigable DAG and tabs
+for overview, prompt, reasoning, response, diff, and recorded tests. Use `/` to
+search, `f` for the existing log filters, `b` to inspect another captured
+branch without switching Git branches, `p` for HEAD ancestry, `h` for health,
+and `?` for the complete keyboard reference.
+
+Selecting a version does not move ProFact HEAD or change files. Checkout and
+tag mutation remain CLI operations while their guarded TUI workflows are built.
 
 ## Testing
 
@@ -46,7 +134,9 @@ profact start --claude    # or capture Claude Code via a local proxy
 pytest
 ```
 
-See [TESTING.md](TESTING.md) for details, [profact_spec.md](profact_spec.md) for the full design, and [profact_roadmap.md](profact_roadmap.md) for planned work.
+See [TESTING.md](TESTING.md) for details, [profact_spec.md](profact_spec.md) for
+the full design, [profact_tui_spec.md](profact_tui_spec.md) for the terminal UI
+contract, and [profact_roadmap.md](profact_roadmap.md) for planned work.
 
 ## License
 

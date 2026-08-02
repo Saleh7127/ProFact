@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import os
 import subprocess
+import tempfile
 from pathlib import Path
+
+from . import privacy
 
 
 class GitError(RuntimeError):
@@ -56,26 +59,34 @@ def head_commit(repo_root: Path) -> str | None:
 
 
 def write_tree(repo_root: Path, index_file: Path | None = None) -> str:
-    index_file = index_file or repo_root / ".profact" / "tmp_index"
+    index_file = index_file or _temporary_index_path(repo_root)
     index_file.parent.mkdir(parents=True, exist_ok=True)
     env = {**os.environ, "GIT_INDEX_FILE": str(index_file)}
+    patterns = _snapshot_exclusion_patterns(repo_root)
+    exclude_file = _temporary_exclude_file(repo_root, patterns)
     try:
-        _run(["add", "-A"], repo_root, env=env)
-        # Drop profact's own capture machinery from the snapshot unconditionally.
-        # .gitignore is itself versioned, so checking out a version created before
-        # `profact start` reverts the ignore rules; `git add -A` would then
-        # capture the (hard-protected, undeletable) hook files, making every
-        # snapshot drift — phantom checkpoints and machine-specific hook scripts
-        # leaking into history. --ignore-unmatch keeps this a no-op otherwise.
+        if has_commits(repo_root):
+            _run(["read-tree", "HEAD"], repo_root, env=env)
+        else:
+            _run(["read-tree", "--empty"], repo_root, env=env)
+        # Remove tracked private paths before `git add`: ignore rules do not
+        # apply to tracked entries, so this prevents modified private bytes from
+        # being hashed by ProFact even when an older revision exists in Git.
+        _remove_index_paths(repo_root, env, patterns)
+        # Exclude before staging so private file bytes are never hashed into the
+        # repository's object database by ProFact's shadow-index snapshot.
         _run(
-            ["rm", "-r", "--cached", "--ignore-unmatch", "--", *_INFRA_PATHS],
+            ["-c", f"core.excludesFile={exclude_file.as_posix()}", "add", "-A"],
             repo_root,
             env=env,
         )
+        _remove_index_paths(repo_root, env, patterns)
         return _run(["write-tree"], repo_root, env=env)
     finally:
         if index_file.exists():
             index_file.unlink()
+        if exclude_file.exists():
+            exclude_file.unlink()
 
 
 def diff_trees(
@@ -92,6 +103,9 @@ def diff_trees(
     if name_only:
         args.append("--name-only")
     args += [before, after]
+    excluded = _snapshot_exclusion_patterns(repo_root)
+    if excluded:
+        args += ["--", ".", *_exclude_pathspecs(excluded)]
     return _run(args, repo_root)
 
 
@@ -102,6 +116,8 @@ def list_tree_files(repo_root: Path, tree: str) -> list[str]:
 
 def path_in_tree(repo_root: Path, tree: str, rel_path: str) -> bool:
     """True if ``rel_path`` names a blob in ``tree``."""
+    if privacy.is_private_path(repo_root, rel_path):
+        return False
     out = _run(["ls-tree", tree, "--", rel_path], repo_root)
     return bool(out.strip())
 
@@ -146,11 +162,16 @@ def blame_porcelain(repo_root: Path, commit: str, rel_path: str) -> str:
 # into a snapshot, even if a checked-out version predates these paths or reverts
 # the .gitignore that hides them.
 _PROTECTED_PREFIXES = (".profact/", ".cursor/hooks/")
-_PROTECTED_FILES = (".cursor/hooks.json",)
+_PROTECTED_FILES = (".cursor/hooks.json", "profact.toml")
 
 # The protected paths as plain repo-relative paths, removed from every snapshot
 # index so they never enter a tree regardless of the current .gitignore state.
-_INFRA_PATHS = (".profact", ".cursor/hooks", ".cursor/hooks.json")
+_INFRA_PATTERNS = (
+    ".profact/**",
+    ".cursor/hooks/**",
+    ".cursor/hooks.json",
+    "profact.toml",
+)
 
 
 def _is_protected(rel: str) -> bool:
@@ -175,11 +196,14 @@ def checkout_tree(
     ``tree`` are deleted (spec §8). Only files inside the tracked-domain trees
     are touched; ``.gitignore``-d files (e.g. ``.env``) are left alone.
     """
-    index_file = index_file or repo_root / ".profact" / "tmp_index"
+    index_file = index_file or _temporary_index_path(repo_root)
     index_file.parent.mkdir(parents=True, exist_ok=True)
     env = {**os.environ, "GIT_INDEX_FILE": str(index_file)}
     try:
         _run(["read-tree", tree], repo_root, env=env)
+        _remove_index_paths(
+            repo_root, env, _snapshot_exclusion_patterns(repo_root)
+        )
         _run(["checkout-index", "-a", "-f"], repo_root, env=env)
     finally:
         if index_file.exists():
@@ -189,7 +213,11 @@ def checkout_tree(
         return
     target_files = set(list_tree_files(repo_root, tree))
     for rel in list_tree_files(repo_root, prev_tree):
-        if rel in target_files or _is_protected(rel):
+        if (
+            rel in target_files
+            or _is_protected(rel)
+            or privacy.is_private_path(repo_root, rel)
+        ):
             continue
         path = repo_root / rel
         if path.is_file() or path.is_symlink():
@@ -206,6 +234,65 @@ def _prune_empty_dirs(start: Path, repo_root: Path) -> None:
         except StopIteration:
             current.rmdir()
             current = current.parent
+
+
+def _temporary_index_path(repo_root: Path) -> Path:
+    """Return a unique, absent path suitable for ``GIT_INDEX_FILE``."""
+    directory = repo_root / ".profact"
+    directory.mkdir(parents=True, exist_ok=True)
+    descriptor, name = tempfile.mkstemp(prefix="tmp_index_", dir=directory)
+    os.close(descriptor)
+    path = Path(name)
+    path.unlink()
+    return path
+
+
+def _temporary_exclude_file(repo_root: Path, patterns: tuple[str, ...]) -> Path:
+    directory = repo_root / ".profact"
+    directory.mkdir(parents=True, exist_ok=True)
+    descriptor, name = tempfile.mkstemp(
+        prefix="privacy_exclude_", dir=directory, text=True
+    )
+    path = Path(name)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        for pattern in patterns:
+            clean = pattern.lstrip("/")
+            handle.write(f"/{clean}\n")
+            if clean.endswith("/**"):
+                handle.write(f"/{clean[:-3]}\n")
+    return path
+
+
+def _snapshot_exclusion_patterns(repo_root: Path) -> tuple[str, ...]:
+    return _INFRA_PATTERNS + privacy.private_paths(repo_root)
+
+
+def _exclude_pathspecs(patterns: tuple[str, ...]) -> list[str]:
+    return [f":(exclude,glob){pattern}" for pattern in patterns]
+
+
+def _include_pathspecs(patterns: tuple[str, ...]) -> list[str]:
+    return [f":(glob){pattern}" for pattern in patterns]
+
+
+def _remove_index_paths(
+    repo_root: Path, env: dict[str, str], patterns: tuple[str, ...]
+) -> None:
+    if not patterns:
+        return
+    _run(
+        [
+            "rm",
+            "-r",
+            "-f",
+            "--cached",
+            "--ignore-unmatch",
+            "--",
+            *_include_pathspecs(patterns),
+        ],
+        repo_root,
+        env=env,
+    )
 
 
 def add_note(repo_root: Path, commit: str, payload: str) -> None:

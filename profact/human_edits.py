@@ -39,6 +39,8 @@ def reconcile(
         return ReconciliationResult(tree=tree_after, version=None)
 
     with store.connect(repo_root) as conn:
+        if store.open_prompts(conn):
+            return ReconciliationResult(tree=tree_after, version=None)
         parent = store.get_version(conn, head_id)
         if parent is None or parent.tree_after is None:
             return ReconciliationResult(tree=tree_after, version=None)
@@ -71,7 +73,14 @@ def snapshot(repo_root: Path, branch: str | None = None) -> ReconciliationResult
         raise SnapshotError("no finalized HEAD exists to use as a snapshot baseline")
 
     with store.connect(repo_root) as conn:
+        open_turns = store.open_prompts(conn)
         parent = store.get_version(conn, head_id)
+    if open_turns:
+        identifiers = ", ".join(version.id for version in open_turns)
+        raise SnapshotError(
+            f"cannot snapshot while prompt turn(s) {identifiers} are still open; "
+            "finish or recover them first"
+        )
     if parent is None:
         raise SnapshotError(f"HEAD references missing version {head_id}")
     if parent.tree_after is None:

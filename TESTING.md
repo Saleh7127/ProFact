@@ -4,7 +4,7 @@
 **(prompt, artifact) pair**. This guide shows how to run it end to end on your
 machine and lists the current limitations.
 
-All commands assume you are at the repo root: `/Users/saleh/Downloads/V2C2`.
+All commands assume you are at the checked-out ProFact repository root.
 
 ---
 
@@ -17,7 +17,7 @@ pip install -e ".[dev]"
 ```
 
 This puts a `profact` command on your PATH (`pyproject.toml [project.scripts]`)
-and installs the dev dependency (`pytest`).
+and installs pytest, async UI test support, and the Textual TUI runtime.
 
 > If you prefer not to install, you can run the CLI as a module from the repo
 > root: `PYTHONPATH=. python -m profact.cli <command>`.
@@ -30,7 +30,7 @@ and installs the dev dependency (`pytest`).
 pytest -q
 ```
 
-Expected: **93 passed**. Coverage by area:
+Expected: all tests pass. Coverage by area:
 
 | File | What it proves |
 |------|----------------|
@@ -46,6 +46,18 @@ Expected: **93 passed**. Coverage by area:
 | `test_testrunner.py` | record pass/fail/error per version, display in show/status/log, doctor keeps output |
 | `test_tags.py` | create/list/delete/move tags, tag refs, cross-branch guard, doctor repair |
 | `test_log_filters.py` | tag/type/branch/model/file/time/test filters, composition, compatibility |
+| `test_health.py` | activity, tests, churn, topology, attention, and empty history |
+| `test_concurrency.py` | WAL reader/writer coexistence and independent shadow indexes |
+| `test_graph_layout.py` | reusable DAG lane and topology layout |
+| `test_version_detail.py` | shared prompt/reasoning/response/diff/test content model |
+| `test_status_view.py` | shared branch/HEAD/dirty/open-turn status model |
+| `test_tui_presenter.py` | framework-free history, search, detail, and health screen models |
+| `test_tui_app.py` | Textual Pilot navigation, dense wide/narrow rendering, scrolling, branch viewing, filters, empty/missing data, and worker teardown |
+| `test_privacy.py` | built-in/custom redaction, config safety, object hashing, and adapter consistency |
+| `test_private_paths.py` | private paths never enter snapshots/diffs and survive checkout |
+| `test_privacy_audit.py` | masked historical scans, reference remediation, and unsafe-orphan cleanup |
+| `test_multi_session.py` | interleaved Cursor/Claude routing, idempotency, atomic parentage, overlap/branch warnings, migration, and session visibility |
+| `test_telemetry.py` | Cursor/recovery completion sources, null usage semantics, display parity, idempotency, and migration |
 
 ---
 
@@ -83,7 +95,14 @@ profact log                 # v2 (prompt) on top of v1 (anchor)
 profact show v2             # prompt, response, diff
 profact checkout v1         # button.py disappears (restored to anchor)
 profact log --graph         # see the DAG + branch tips
+profact health              # inspect activity, tests, churn, and attention
+profact tui                 # browse the same history interactively
 ```
+
+Inside the TUI, press `?` for the keyboard reference. Resize below 80 columns
+to exercise the stacked history/detail layout. Viewing a different branch with
+`b` must not change `git branch --show-current`; browsing must leave `git
+status --short` and ProFact HEAD unchanged.
 
 Compare versions with `profact diff` (read-only; works across git branches):
 
@@ -512,7 +531,7 @@ It looks for:
   any version; `--fix` deletes them to reclaim space.
 - **Dangling open turns** — `prompt` versions never finalized (`tree_after`
   NULL), e.g. a session that crashed before `stop`. These are **reported only**
-  and never deleted (they hold real work and finalize on the next prompt).
+  by doctor and never deleted. Use `profact recover` to resolve them explicitly.
 
 `doctor` never touches `prompt`/`anchor`/`human` versions or any checkpoint that
 recorded real source changes.
@@ -529,17 +548,22 @@ recorded real source changes.
 - **Cloud agents not supported.** Cursor cloud agents fire only tool-level
   hooks (no `beforeSubmitPrompt`/`stop`/`sessionEnd`), so capture there is out
   of scope.
-- **One active session at a time.** The open turn is identified as "the HEAD
-  prompt version whose `tree_after` is NULL." Two concurrent agent sessions in
-  the same repo would interleave and mis-attribute. Single local user assumed.
+- **Concurrent sessions share one working tree.** Prompt/thought/response/stop
+  events route reliably by session and turn identity, and duplicate hooks are
+  idempotent. If open intervals overlap, both versions are marked uncertain
+  because tree snapshots cannot prove which agent wrote each file. Exact
+  concurrent file ownership requires isolated worktrees or per-write provenance.
 - **Diffs are tree snapshots, not per-edit.** `afterFileEdit` is intentionally
   not wired; the diff is `git diff <tree_before> <tree_after>`. Exact per-edit
   attribution is reserved for later. (Claude path uses a watcher quiet-period to
   decide when to snapshot; very fast successive turns could blur a boundary.)
 - **Mid-turn crash.** If Cursor/the machine dies after `beforeSubmitPrompt` but
-  before `stop`, the version stays open (`tree_after` NULL) until the *next*
-  prompt closes it — its diff then spans until that moment. No active recovery
-  on startup yet.
+  before `stop`, the version stays open (`tree_after` NULL). Run `profact
+  recover` to inspect it. `--finalize` adopts the current tree only for the
+  current branch HEAD and marks attribution uncertain; `--preserve` closes any
+  dangling turn as incomplete without touching files, so pending changes can
+  be captured separately with `profact snapshot`. Recovery never deletes
+  captured prompt intent.
 
 ### Design decisions that are limitations by choice
 - **Branch-scoped history with carry-over.** Each Git branch has its own HEAD.

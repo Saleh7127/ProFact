@@ -9,16 +9,22 @@ from starlette.responses import Response
 from starlette.routing import Route
 
 from profact import store
-from profact.adapters.claude_code_proxy import build_app
+from profact.adapters.claude_code_proxy import (
+    _SSEAssistantParser,
+    _json_response_event,
+    build_app,
+)
 from profact.session import CaptureSession
 
 SSE_STREAM = (
     'event: message_start\n'
-    'data: {"type":"message_start","message":{"model":"claude-test"}}\n\n'
+    'data: {"type":"message_start","message":{"model":"claude-test","usage":{"input_tokens":10,"output_tokens":1,"cache_read_input_tokens":4,"cache_creation_input_tokens":3}}}\n\n'
     'event: content_block_delta\n'
     'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello "}}\n\n'
     'event: content_block_delta\n'
     'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"world"}}\n\n'
+    'event: message_delta\n'
+    'data: {"type":"message_delta","usage":{"output_tokens":5}}\n\n'
     'event: message_stop\n'
     'data: {"type":"message_stop"}\n\n'
 )
@@ -90,4 +96,38 @@ def test_proxy_creates_exactly_one_version(git_repo: Path):
     assert store.read_object(repo_root, version.prompt_ref) == "create a login page"
     assert version.response_ref is not None
     assert "Hello world" in store.read_object(repo_root, version.response_ref)
+    assert version.input_tokens == 20
+    assert version.output_tokens == 10
+    assert version.cache_read_tokens == 8
+    assert version.cache_creation_tokens == 6
+    assert version.api_call_count == 2
+    assert version.completed_at is not None
+    assert version.completion_source == "claude-session-end"
     assert store.read_head(repo_root, "main") == version.id  # HEAD advanced on close
+
+
+def test_streaming_usage_is_cumulative_within_one_api_call() -> None:
+    parser = _SSEAssistantParser()
+    parser.feed(
+        b'data: {"type":"message_start","message":{"model":"m","usage":{"input_tokens":7,"output_tokens":1}}}\n'
+        b'data: {"type":"message_delta","usage":{"output_tokens":3}}\n'
+        b'data: {"type":"message_delta","usage":{"output_tokens":9}}\n'
+    )
+
+    event = parser.event()
+
+    assert event.usage == {"input_tokens": 7, "output_tokens": 9}
+
+
+def test_non_streaming_response_exposes_provider_usage() -> None:
+    event = _json_response_event(
+        b'{"role":"assistant","model":"m","content":[{"type":"text","text":"ok"}],'
+        b'"usage":{"input_tokens":11,"output_tokens":6,"cache_read_input_tokens":2}}'
+    )
+
+    assert event is not None
+    assert event.usage == {
+        "input_tokens": 11,
+        "output_tokens": 6,
+        "cache_read_tokens": 2,
+    }

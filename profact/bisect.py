@@ -107,6 +107,14 @@ def bisect(
     if not cmd:
         raise BisectError("no test command given")
 
+    open_turns = store.open_prompts(conn)
+    if open_turns:
+        identifiers = ", ".join(version.id for version in open_turns)
+        raise BisectError(
+            f"cannot bisect while prompt turn(s) {identifiers} are open; "
+            "finish or recover them first"
+        )
+
     good = store.get_version(conn, good_id)
     if good is None:
         raise BisectError(f"no such version '{good_id}'")

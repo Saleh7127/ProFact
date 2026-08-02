@@ -133,7 +133,10 @@ Effort/Impact are rough (Low / Med / High). ★ = strong thesis contribution.
   `status`, and `log --tests`. Foundation for effectiveness scoring and
   bug-causing-prompt analysis. ★ *Impact: High · Effort: Med.*
 - **Richer model metadata** — provider, model version, temperature, tools,
-  context size, token counts (where available). *Impact: High · Effort: Med.*
+  context size, token counts (where available). Provider-reported Claude token
+  totals, API-call count, completion timestamp/source, and wall duration are
+  implemented; unavailable Cursor usage remains explicitly unknown. ✅
+  *Impact: High · Effort: Med.*
 - **Smarter Git-commit linking** — suggest attaching a whole prompt chain to a
   commit, not just current HEAD. *Impact: High · Effort: Med.*
 - **CI provenance check** — verify generated code has prompt lineage and no
@@ -147,7 +150,9 @@ Effort/Impact are rough (Low / Med / High). ★ = strong thesis contribution.
 - **AI churn metrics** — lines repeatedly rewritten across nearby versions;
   flags unstable code / poor prompt decomposition. *Impact: High · Effort: Med.*
 - **Cost / token tracking** — tokens, latency, estimated cost per
-  version/session. *Impact: High · Effort: Med.*
+  version/session. Provider token totals and observed wall duration are
+  implemented. Estimated monetary cost is deliberately excluded because prices
+  vary by model, date, and cache tier. *Impact: High · Effort: Med.*
 - **Prompt-effectiveness score** — did a prompt help? (tests passed, sane diff
   size, not later reverted, low churn). ★ *Impact: High · Effort: High.*
 - **Model comparison** — replay equivalent prompts across models on the same
@@ -171,7 +176,9 @@ Effort/Impact are rough (Low / Med / High). ★ = strong thesis contribution.
 
 ### 3.8 Robustness & productionization
 - **Multi-session support** — track open turns by session/generation instead of
-  assuming one active session (lifts a core MVP limit). *Impact: Very High · Effort: High.*
+  assuming one active session; event routing and overlap labeling are
+  implemented. Exact shared-tree file authorship remains intentionally
+  unclaimed. ✅ *Impact: Very High · Effort: High.*
 - **Crash recovery** — on startup, detect dangling open turns and offer to
   finalize/discard/checkpoint. *Impact: High · Effort: Med.*
 - **Git branch-switch hooks** — observe branch changes to make carry-over
@@ -295,8 +302,8 @@ deliberately deferred.
 - [x] Content-addressed object storage and SQLite metadata.
 - [x] Prompt DAG with branch-local HEADs and Git-branch carry-over.
 - [x] Safe checkout with automatic checkpoints and protected ignored files.
-- [x] `init`, `start`, `log`, `show`, `status`, `diff`, `checkout`, `note`, and
-  `doctor`.
+- [x] `init`, `start`, `log`, `show`, `status`, `diff`, `checkout`, `note`,
+  `recover`, and `doctor`.
 - [x] Prompt attribution through `blame` and `why`.
 - [x] Regression search through `bisect`.
 - [x] Test-result recording and display through `test` and `log --tests`.
@@ -305,23 +312,41 @@ deliberately deferred.
   test status.
 - [x] CLI responsibility cleanup: checkout, doctor, Cursor setup, and log query
   preparation live outside `cli.py`.
+- [x] `profact health` repository-history summary with activity, test, churn,
+  topology, and attention findings.
+- [x] Privacy controls with default secret redaction, configurable private
+  paths/custom patterns, and masked historical scan/remediation.
+- [x] Reliable multi-session event routing with durable Cursor/Claude turn
+  identities, idempotent hooks, atomic branch ordering, and honest overlap and
+  branch-switch attribution warnings.
+- [x] Per-prompt completion timestamp/source and provider-reported Claude input,
+  output, cache, and API-call usage; no guessed Cursor tokens or mutable cost
+  estimates.
 
-### Next milestone — make existing history immediately useful
+### Completed milestone — make existing history immediately useful
 
-- [ ] Implement `profact health`, initially as a CLI report.
+- [x] Implement `profact health`, initially as a CLI report.
   - Summarize prompt, human-edit, checkpoint, and branch counts.
   - Summarize passed, failed, errored, and untested versions.
   - Identify high-churn files and repeatedly rewritten areas.
   - Surface uncertain attribution, dangling turns, and abandoned side paths.
   - Highlight versions worth inspecting with `show`, `blame`, or `bisect`.
   - Keep calculations inspectable; do not emit an unexplained quality score.
-- [ ] Add focused tests for every health metric and empty/partial-history cases.
+- [x] Add focused tests for health metrics and empty/partial-history cases.
 - [ ] Document a reproducible demo session that produces meaningful health
-  output.
+  output alongside the TUI demo.
 
-### Then — make history visible
+### Current milestone — make history visible
 
 - [ ] Build an interactive TUI over the existing read-only APIs.
+  - [x] Harden SQLite and Git shadow-index concurrency for a long-lived reader.
+  - [x] Add reusable version-detail, graph-layout, status, and presenter models.
+  - [x] Add the read-only Textual browser, responsive detail tabs, search,
+    filters, branch viewing, ancestry mode, health, help, and manual refresh.
+  - [x] Stabilize dense wide/narrow rendering, keyboard scrolling, empty and
+    missing-content states, and startup/quit worker behavior through Pilot use.
+  - [ ] Add guarded checkout and repository-wide tag actions after read-only
+    interaction stability is established.
   - DAG and branch navigation.
   - Prompt, reasoning, response, and diff panes.
   - Tag, test, confidence, and health indicators.
@@ -332,16 +357,26 @@ deliberately deferred.
 - [ ] Consider a local web dashboard and editor panel only after the TUI proves
   the information architecture.
 
+The implementation contract, visual semantics, safety boundaries, and testing
+gates for this milestone live in `profact_tui_spec.md`.
+
 ### Trust and robustness work
 
-- [ ] Add crash recovery for dangling open turns: finalize, preserve, or discard
-  with explicit user choice.
-- [ ] Add a secret scanner for prompts, responses, reasoning, and diffs.
-- [ ] Add configurable redaction and private-path opt-out.
-- [ ] Add `profact.toml` for capture, privacy, test, retention, and UI settings.
-- [ ] Make Git branch carry-over precise with branch-switch observation.
-- [ ] Add multi-session event routing before claiming concurrent-session
-  support; solve or clearly mark overlapping-edit attribution.
+- [x] Add explicit crash recovery for dangling open turns: inspect, finalize
+  the current branch HEAD with uncertain attribution, or preserve any turn as
+  incomplete without touching files. Destructive discard is deliberately
+  excluded because captured prompts are immutable work, not repair artifacts.
+- [x] Add a secret scanner for prompts, responses, reasoning, diffs, and test
+  output at the object-store boundary.
+- [x] Add configurable redaction and private-path opt-out.
+- [x] Add the `[privacy]` table in repository-level `profact.toml`; capture,
+  test, retention, and UI settings remain future extensions.
+- [x] Preserve turn routing across Git branch switches and mark the affected
+  version uncertain without moving the new branch's ProFact HEAD. Full external
+  branch-switch observation is unnecessary for this local routing contract.
+- [x] Add multi-session event routing and clearly mark overlapping-edit
+  attribution as uncertain; exact file ownership in one working tree remains
+  out of scope.
 - [ ] Profile and optimize snapshotting for large repositories.
 
 ### Deferred features
@@ -362,9 +397,9 @@ deliberately deferred.
 
 ### Recommended order
 
-1. `profact health`.
-2. Interactive TUI.
-3. Crash recovery.
-4. Secret scanning, redaction, and private-path rules.
-5. Replay with transformation-to-transformation comparison.
-6. Export, research tooling, and productionization.
+Completed: `profact health`, the stabilized read-only TUI, explicit crash
+recovery, local privacy controls, and reliable multi-session event routing.
+
+1. Replay with transformation-to-transformation comparison.
+2. Redacted export and research tooling.
+3. Large-repository profiling and release productionization.

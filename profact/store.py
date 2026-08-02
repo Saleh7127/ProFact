@@ -11,6 +11,7 @@ DB_NAME = "history.db"
 HEAD_NAME = "HEAD"
 OBJECTS_DIR = "objects"
 TMP_INDEX = "tmp_index"
+SQLITE_BUSY_TIMEOUT_MS = 5_000
 
 VERSION_TYPES = ("prompt", "anchor", "checkpoint", "human")
 
@@ -33,7 +34,15 @@ CREATE TABLE IF NOT EXISTS versions (
     generation_id   TEXT,
     conversation_id TEXT,
     thinking_ref    TEXT,
-    thinking_source TEXT
+    thinking_source TEXT,
+    confidence_reason TEXT,
+    completed_at TEXT,
+    completion_source TEXT,
+    input_tokens INTEGER,
+    output_tokens INTEGER,
+    cache_read_tokens INTEGER,
+    cache_creation_tokens INTEGER,
+    api_call_count INTEGER
 );
 
 -- One HEAD per Git branch (branch-local HEADs). The legacy .profact/HEAD file
@@ -42,6 +51,11 @@ CREATE TABLE IF NOT EXISTS versions (
 CREATE TABLE IF NOT EXISTS heads (
     git_branch  TEXT PRIMARY KEY,
     version_id  TEXT
+);
+
+CREATE TABLE IF NOT EXISTS repo_state (
+    key         TEXT PRIMARY KEY,
+    value       TEXT
 );
 
 -- Test outcome per version (behavior-aware history). One row per version; a
@@ -64,6 +78,19 @@ CREATE TABLE IF NOT EXISTS tags (
     version_id  TEXT NOT NULL,
     created_at  TEXT NOT NULL
 );
+
+CREATE INDEX IF NOT EXISTS idx_versions_conv_gen
+    ON versions(conversation_id, generation_id);
+CREATE INDEX IF NOT EXISTS idx_versions_parent
+    ON versions(parent_id);
+CREATE INDEX IF NOT EXISTS idx_versions_open
+    ON versions(git_branch)
+    WHERE type = 'prompt' AND tree_after IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_versions_turn
+    ON versions(conversation_id, generation_id)
+    WHERE type = 'prompt'
+      AND conversation_id IS NOT NULL
+      AND generation_id IS NOT NULL;
 """
 
 TEST_STATUSES = ("pass", "fail", "error")
@@ -82,6 +109,14 @@ _MIGRATION_COLUMNS = (
     ("conversation_id", "TEXT"),
     ("thinking_ref", "TEXT"),
     ("thinking_source", "TEXT"),
+    ("confidence_reason", "TEXT"),
+    ("completed_at", "TEXT"),
+    ("completion_source", "TEXT"),
+    ("input_tokens", "INTEGER"),
+    ("output_tokens", "INTEGER"),
+    ("cache_read_tokens", "INTEGER"),
+    ("cache_creation_tokens", "INTEGER"),
+    ("api_call_count", "INTEGER"),
 )
 
 
@@ -105,6 +140,14 @@ class Version:
     conversation_id: str | None = None
     thinking_ref: str | None = None
     thinking_source: str | None = None
+    confidence_reason: str | None = None
+    completed_at: str | None = None
+    completion_source: str | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    cache_read_tokens: int | None = None
+    cache_creation_tokens: int | None = None
+    api_call_count: int | None = None
 
 
 @dataclass
@@ -156,8 +199,12 @@ def init_db(repo_root: Path) -> None:
 
 def connect(repo_root: Path) -> sqlite3.Connection:
     profact_dir(repo_root).mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(db_path(repo_root))
+    conn = sqlite3.connect(
+        db_path(repo_root), timeout=SQLITE_BUSY_TIMEOUT_MS / 1_000
+    )
     conn.row_factory = sqlite3.Row
+    conn.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
+    conn.execute("PRAGMA journal_mode = WAL")
     _migrate(conn)
     return conn
 
@@ -178,6 +225,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE TABLE IF NOT EXISTS heads (git_branch TEXT PRIMARY KEY, version_id TEXT)"
     )
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS repo_state (key TEXT PRIMARY KEY, value TEXT)"
+    )
     # Behavior-aware history (test outcomes) was added after the initial schema.
     conn.execute(
         "CREATE TABLE IF NOT EXISTS test_results ("
@@ -188,11 +238,35 @@ def _migrate(conn: sqlite3.Connection) -> None:
         "CREATE TABLE IF NOT EXISTS tags ("
         "name TEXT PRIMARY KEY, version_id TEXT NOT NULL, created_at TEXT NOT NULL)"
     )
-    if changed:
-        conn.commit()
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_versions_conv_gen "
+        "ON versions(conversation_id, generation_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_versions_parent ON versions(parent_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_versions_open ON versions(git_branch) "
+        "WHERE type = 'prompt' AND tree_after IS NULL"
+    )
+    try:
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_versions_turn "
+            "ON versions(conversation_id, generation_id) "
+            "WHERE type = 'prompt' AND conversation_id IS NOT NULL "
+            "AND generation_id IS NOT NULL"
+        )
+    except sqlite3.IntegrityError:
+        # Keep legacy duplicate turn rows untouched. The non-unique lookup index
+        # still enables deterministic routing for those repositories.
+        pass
+    conn.commit()
 
 
 def write_object(repo_root: Path, text: str) -> str:
+    from . import privacy
+
+    text, _findings = privacy.redact_for(repo_root, text)
     data = text.encode("utf-8")
     digest = hashlib.sha256(data).hexdigest()
     path = objects_dir(repo_root) / digest
@@ -223,25 +297,59 @@ def read_head(repo_root: Path, branch: str, *, seed: bool = True) -> str | None:
         row = conn.execute(
             "SELECT version_id FROM heads WHERE git_branch = ?", (branch,)
         ).fetchone()
-    if row and row["version_id"]:
-        return row["version_id"]
-    if not seed:
-        return None
+        if row and row["version_id"]:
+            return row["version_id"]
+        if not seed:
+            return None
+        state = conn.execute(
+            "SELECT value FROM repo_state WHERE key = 'last_active'"
+        ).fetchone()
+        if state and state["value"]:
+            return state["value"]
     return _read_global_head(repo_root)
 
 
 def write_head(repo_root: Path, branch: str, version_id: str) -> None:
     """Set ``branch``'s HEAD and advance the repo-wide "last active" pointer."""
     with connect(repo_root) as conn:
-        conn.execute(
-            """
-            INSERT INTO heads (git_branch, version_id) VALUES (?, ?)
-            ON CONFLICT(git_branch) DO UPDATE SET version_id = excluded.version_id
-            """,
-            (branch, version_id),
-        )
+        _upsert_head(conn, branch, version_id)
         conn.commit()
     _write_global_head(repo_root, version_id)
+
+
+def _head_from_connection(
+    conn: sqlite3.Connection, repo_root: Path, branch: str
+) -> str | None:
+    row = conn.execute(
+        "SELECT version_id FROM heads WHERE git_branch = ?", (branch,)
+    ).fetchone()
+    if row and row["version_id"]:
+        return row["version_id"]
+    state = conn.execute(
+        "SELECT value FROM repo_state WHERE key = 'last_active'"
+    ).fetchone()
+    if state and state["value"]:
+        return state["value"]
+    return _read_global_head(repo_root)
+
+
+def _upsert_head(
+    conn: sqlite3.Connection, branch: str, version_id: str
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO heads (git_branch, version_id) VALUES (?, ?)
+        ON CONFLICT(git_branch) DO UPDATE SET version_id = excluded.version_id
+        """,
+        (branch, version_id),
+    )
+    conn.execute(
+        """
+        INSERT INTO repo_state (key, value) VALUES ('last_active', ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        """,
+        (version_id,),
+    )
 
 
 def _read_global_head(repo_root: Path) -> str | None:
@@ -258,12 +366,20 @@ def _write_global_head(repo_root: Path, version_id: str) -> None:
 
 def clear_global_head_if_missing(repo_root: Path) -> bool:
     """Clear the carry-over pointer if its version has been removed."""
-    global_head = _read_global_head(repo_root)
-    if not global_head:
-        return False
-    with connect(repo_root) as conn:
+    conn = connect(repo_root)
+    try:
+        state = conn.execute(
+            "SELECT value FROM repo_state WHERE key = 'last_active'"
+        ).fetchone()
+        global_head = state["value"] if state and state["value"] else _read_global_head(repo_root)
+        if not global_head:
+            return False
         if get_version(conn, global_head) is not None:
             return False
+        conn.execute("DELETE FROM repo_state WHERE key = 'last_active'")
+        conn.commit()
+    finally:
+        conn.close()
     _write_global_head(repo_root, "")
     return True
 
@@ -296,9 +412,146 @@ def create_version(
     conversation_id: str | None = None,
     thinking_ref: str | None = None,
     thinking_source: str | None = None,
+    confidence_reason: str | None = None,
+    completed_at: str | None = None,
+    completion_source: str | None = None,
+    input_tokens: int | None = None,
+    output_tokens: int | None = None,
+    cache_read_tokens: int | None = None,
+    cache_creation_tokens: int | None = None,
+    api_call_count: int | None = None,
 ) -> Version:
     if type not in VERSION_TYPES:
         raise ValueError(f"unknown version type: {type}")
+    try:
+        if not conn.in_transaction:
+            conn.execute("BEGIN IMMEDIATE")
+        version = _insert_version(
+            conn,
+            git_branch=git_branch,
+            tree_before=tree_before,
+            type=type,
+            parent_id=parent_id,
+            tree_after=tree_after,
+            prompt_ref=prompt_ref,
+            response_ref=response_ref,
+            model=model,
+            temperature=temperature,
+            diff_ref=diff_ref,
+            commit_hash=commit_hash,
+            confidence=confidence,
+            generation_id=generation_id,
+            conversation_id=conversation_id,
+            thinking_ref=thinking_ref,
+            thinking_source=thinking_source,
+            confidence_reason=confidence_reason,
+            completed_at=completed_at,
+            completion_source=completion_source,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cache_read_tokens=cache_read_tokens,
+            cache_creation_tokens=cache_creation_tokens,
+            api_call_count=api_call_count,
+        )
+        conn.commit()
+        return version
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def create_prompt_at_head(
+    repo_root: Path,
+    *,
+    git_branch: str,
+    tree_before: str,
+    prompt_ref: str | None,
+    model: str | None,
+    temperature: float | None = None,
+    conversation_id: str | None,
+    generation_id: str | None,
+) -> tuple[Version, bool]:
+    """Atomically create an idempotent prompt and advance its branch HEAD."""
+    conn = connect(repo_root)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        existing = find_prompt_by_turn(conn, conversation_id, generation_id)
+        if existing is not None:
+            conn.commit()
+            return existing, False
+        open_now = open_prompts(conn)
+        reason = "overlapping sessions shared one working tree" if open_now else None
+        if reason:
+            mark_versions_uncertain(
+                conn, [version.id for version in open_now], reason
+            )
+        parent_id = _head_from_connection(conn, repo_root, git_branch)
+        version = _insert_version(
+            conn,
+            git_branch=git_branch,
+            tree_before=tree_before,
+            parent_id=parent_id,
+            prompt_ref=prompt_ref,
+            model=model,
+            temperature=temperature,
+            confidence="uncertain" if open_now else "high",
+            confidence_reason=reason,
+            conversation_id=conversation_id,
+            generation_id=generation_id,
+        )
+        _upsert_head(conn, git_branch, version.id)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+    _write_global_head(repo_root, version.id)
+    return version, True
+
+
+def mark_versions_uncertain(
+    conn: sqlite3.Connection, version_ids: list[str], reason: str
+) -> None:
+    if not version_ids:
+        return
+    placeholders = ",".join("?" for _ in version_ids)
+    conn.execute(
+        f"UPDATE versions SET confidence = 'uncertain', "
+        f"confidence_reason = COALESCE(confidence_reason, ?) "
+        f"WHERE id IN ({placeholders})",
+        [reason, *version_ids],
+    )
+
+
+def _insert_version(
+    conn: sqlite3.Connection,
+    *,
+    git_branch: str,
+    tree_before: str,
+    type: str = "prompt",
+    parent_id: str | None = None,
+    tree_after: str | None = None,
+    prompt_ref: str | None = None,
+    response_ref: str | None = None,
+    model: str | None = None,
+    temperature: float | None = None,
+    diff_ref: str | None = None,
+    commit_hash: str | None = None,
+    confidence: str = "high",
+    generation_id: str | None = None,
+    conversation_id: str | None = None,
+    thinking_ref: str | None = None,
+    thinking_source: str | None = None,
+    confidence_reason: str | None = None,
+    completed_at: str | None = None,
+    completion_source: str | None = None,
+    input_tokens: int | None = None,
+    output_tokens: int | None = None,
+    cache_read_tokens: int | None = None,
+    cache_creation_tokens: int | None = None,
+    api_call_count: int | None = None,
+) -> Version:
     version = Version(
         id=next_version_id(conn),
         parent_id=parent_id,
@@ -318,14 +571,25 @@ def create_version(
         conversation_id=conversation_id,
         thinking_ref=thinking_ref,
         thinking_source=thinking_source,
+        confidence_reason=confidence_reason,
+        completed_at=completed_at,
+        completion_source=completion_source,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cache_read_tokens=cache_read_tokens,
+        cache_creation_tokens=cache_creation_tokens,
+        api_call_count=api_call_count,
     )
     conn.execute(
         """
         INSERT INTO versions (
             id, parent_id, type, git_branch, timestamp, prompt_ref, response_ref,
             model, temperature, diff_ref, tree_before, tree_after, commit_hash,
-            confidence, generation_id, conversation_id, thinking_ref, thinking_source
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            confidence, generation_id, conversation_id, thinking_ref,
+            thinking_source, confidence_reason, completed_at, completion_source,
+            input_tokens, output_tokens, cache_read_tokens,
+            cache_creation_tokens, api_call_count
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """,
         (
             version.id,
@@ -346,9 +610,16 @@ def create_version(
             version.conversation_id,
             version.thinking_ref,
             version.thinking_source,
+            version.confidence_reason,
+            version.completed_at,
+            version.completion_source,
+            version.input_tokens,
+            version.output_tokens,
+            version.cache_read_tokens,
+            version.cache_creation_tokens,
+            version.api_call_count,
         ),
     )
-    conn.commit()
     return version
 
 
@@ -357,6 +628,45 @@ def get_version(conn: sqlite3.Connection, version_id: str) -> Version | None:
         "SELECT * FROM versions WHERE id = ?", (version_id,)
     ).fetchone()
     return _row_to_version(row) if row else None
+
+
+def find_prompt_by_turn(
+    conn: sqlite3.Connection,
+    conversation_id: str | None,
+    generation_id: str | None,
+) -> Version | None:
+    """Resolve one prompt turn by its durable adapter identity."""
+    if not conversation_id or not generation_id:
+        return None
+    row = conn.execute(
+        "SELECT * FROM versions WHERE type = 'prompt' "
+        "AND conversation_id = ? AND generation_id = ? "
+        "ORDER BY timestamp LIMIT 1",
+        (conversation_id, generation_id),
+    ).fetchone()
+    return _row_to_version(row) if row else None
+
+
+def open_prompts(
+    conn: sqlite3.Connection,
+    *,
+    conversation_id: str | None = None,
+    git_branch: str | None = None,
+) -> list[Version]:
+    """Return unfinalized prompt turns, optionally scoped by session/branch."""
+    clauses = ["type = 'prompt'", "tree_after IS NULL"]
+    params: list[str] = []
+    if conversation_id is not None:
+        clauses.append("conversation_id = ?")
+        params.append(conversation_id)
+    if git_branch is not None:
+        clauses.append("git_branch = ?")
+        params.append(git_branch)
+    rows = conn.execute(
+        f"SELECT * FROM versions WHERE {' AND '.join(clauses)} ORDER BY timestamp",
+        params,
+    ).fetchall()
+    return [_row_to_version(row) for row in rows]
 
 
 def list_versions(conn: sqlite3.Connection, git_branch: str) -> list[Version]:
@@ -430,6 +740,11 @@ def ancestry(conn: sqlite3.Connection, version_id: str) -> list[Version]:
 def all_versions(conn: sqlite3.Connection) -> list[Version]:
     rows = conn.execute("SELECT * FROM versions ORDER BY timestamp").fetchall()
     return [_row_to_version(row) for row in rows]
+
+
+def dangling_open_turns(conn: sqlite3.Connection) -> list[Version]:
+    """Return prompt turns that never received a finalized tree snapshot."""
+    return open_prompts(conn)
 
 
 def all_heads(conn: sqlite3.Connection) -> dict[str, str | None]:
@@ -669,4 +984,24 @@ def _row_to_version(row: sqlite3.Row) -> Version:
         conversation_id=row["conversation_id"] if "conversation_id" in row.keys() else None,
         thinking_ref=row["thinking_ref"] if "thinking_ref" in row.keys() else None,
         thinking_source=row["thinking_source"] if "thinking_source" in row.keys() else None,
+        confidence_reason=(
+            row["confidence_reason"] if "confidence_reason" in row.keys() else None
+        ),
+        completed_at=row["completed_at"] if "completed_at" in row.keys() else None,
+        completion_source=(
+            row["completion_source"] if "completion_source" in row.keys() else None
+        ),
+        input_tokens=row["input_tokens"] if "input_tokens" in row.keys() else None,
+        output_tokens=row["output_tokens"] if "output_tokens" in row.keys() else None,
+        cache_read_tokens=(
+            row["cache_read_tokens"] if "cache_read_tokens" in row.keys() else None
+        ),
+        cache_creation_tokens=(
+            row["cache_creation_tokens"]
+            if "cache_creation_tokens" in row.keys()
+            else None
+        ),
+        api_call_count=(
+            row["api_call_count"] if "api_call_count" in row.keys() else None
+        ),
     )
