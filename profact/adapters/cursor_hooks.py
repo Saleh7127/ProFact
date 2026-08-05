@@ -23,13 +23,12 @@ from __future__ import annotations
 
 import json
 import os
-import sqlite3
 import stat
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 
-from .. import git_ops, human_edits, store
+from .. import store
+from . import hook_capture
 
 EVENT_PROMPT = "beforeSubmitPrompt"
 EVENT_THOUGHT = "afterAgentThought"
@@ -125,10 +124,7 @@ def handle(repo_root: Path, event: dict) -> dict:
         _finalize_event(repo_root, event, "cursor-stop")
     elif name == EVENT_SESSION_END:
         _finalize_event(repo_root, event, "cursor-session-end")
-        with store.connect(repo_root) as conn:
-            has_open_turns = bool(store.open_prompts(conn))
-        if not has_open_turns:
-            human_edits.reconcile(repo_root)
+        hook_capture.reconcile_if_idle(repo_root)
     return {}
 
 
@@ -158,48 +154,16 @@ def _ensure_gitignore(repo_root: Path, *entries: str) -> None:
 
 
 def _on_prompt(repo_root: Path, event: dict) -> None:
-    branch = git_ops.current_branch(repo_root)
     conversation_id, generation_id = _event_identity(event)
-    prompt_text = event.get("prompt") or ""
-    prompt_ref = store.write_object(repo_root, prompt_text) if prompt_text else None
-
-    with store.connect(repo_root) as conn:
-        existing = store.find_prompt_by_turn(conn, conversation_id, generation_id)
-        if existing is not None:
-            if existing.prompt_ref == prompt_ref:
-                return
-            # Older Cursor payloads/tests may reuse a generation id. The new
-            # turn remains session-routable as the sole open turn but cannot
-            # honestly claim the duplicated external turn key.
-            generation_id = None
-        if conversation_id:
-            previous = store.open_prompts(conn, conversation_id=conversation_id)
-        else:
-            legacy = _legacy_open_prompt(repo_root, conn)
-            previous = [legacy] if legacy else []
-
-    # A new prompt proves prior turns in this conversation are no longer live.
-    # Other conversations remain open and are never closed by this event.
-    for version in previous:
-        _finalize_version(repo_root, version.id, "cursor-superseded")
-
-    with store.connect(repo_root) as conn:
-        if store.find_prompt_by_turn(conn, conversation_id, generation_id):
-            return
-        other_open = store.open_prompts(conn)
-
-    if other_open:
-        tree_before = git_ops.write_tree(repo_root)
-    else:
-        tree_before = human_edits.reconcile(repo_root, branch).tree
-    store.create_prompt_at_head(
+    hook_capture.open_prompt(
         repo_root,
-        git_branch=branch,
-        tree_before=tree_before,
-        prompt_ref=prompt_ref,
-        model=event.get("model"),
         conversation_id=conversation_id,
         generation_id=generation_id,
+        prompt_text=event.get("prompt") or "",
+        model=event.get("model"),
+        superseded_source="cursor-superseded",
+        allow_reused_turn_id=True,
+        legacy_fallback=True,
     )
 
 
@@ -210,169 +174,42 @@ def _on_thought(repo_root: Path, event: dict) -> None:
     calls), so blocks are aggregated onto the same version, mirroring responses.
     """
     text = event.get("text") or ""
-    if not text:
-        return
-    with store.connect(repo_root) as conn:
-        conn.execute("BEGIN IMMEDIATE")
-        version = _resolve_prompt(repo_root, conn, event)
-        if version is None:
-            return
-        existing = (
-            store.read_object(repo_root, version.thinking_ref)
-            if version.thinking_ref
-            else None
-        )
-        combined = f"{existing}\n{text}" if existing else text
-        thinking_ref = store.write_object(repo_root, combined)
-        late = version.tree_after is not None
-        confidence = "uncertain" if late else version.confidence
-        reason = (
-            "capture event arrived after turn finalization"
-            if late
-            else version.confidence_reason
-        )
-        conn.execute(
-            "UPDATE versions SET thinking_ref = ?, thinking_source = ?, "
-            "confidence = ?, confidence_reason = COALESCE(confidence_reason, ?) "
-            "WHERE id = ?",
-            (thinking_ref, store.THINKING_CAPTURED, confidence, reason, version.id),
-        )
-        conn.commit()
+    conversation_id, generation_id = _event_identity(event)
+    hook_capture.append_thinking(
+        repo_root,
+        conversation_id=conversation_id,
+        generation_id=generation_id,
+        text=text,
+        legacy_fallback=True,
+        reused_key_fallback=True,
+    )
 
 
 def _on_response(repo_root: Path, event: dict) -> None:
-    text = event.get("text") or ""
-    if not text:
-        return
-    with store.connect(repo_root) as conn:
-        conn.execute("BEGIN IMMEDIATE")
-        version = _resolve_prompt(repo_root, conn, event)
-        if version is None:
-            return
-        existing = (
-            store.read_object(repo_root, version.response_ref)
-            if version.response_ref
-            else None
-        )
-        combined = f"{existing}\n{text}" if existing else text
-        response_ref = store.write_object(repo_root, combined)
-        late = version.tree_after is not None
-        confidence = "uncertain" if late else version.confidence
-        reason = (
-            "capture event arrived after turn finalization"
-            if late
-            else version.confidence_reason
-        )
-        conn.execute(
-            "UPDATE versions SET response_ref = ?, model = COALESCE(model, ?), "
-            "confidence = ?, confidence_reason = COALESCE(confidence_reason, ?) "
-            "WHERE id = ?",
-            (response_ref, event.get("model"), confidence, reason, version.id),
-        )
-        conn.commit()
+    conversation_id, generation_id = _event_identity(event)
+    hook_capture.append_response(
+        repo_root,
+        conversation_id=conversation_id,
+        generation_id=generation_id,
+        text=event.get("text") or "",
+        model=event.get("model"),
+        legacy_fallback=True,
+        reused_key_fallback=True,
+    )
 
 
 def _finalize_event(
     repo_root: Path, event: dict, completion_source: str
 ) -> None:
-    with store.connect(repo_root) as conn:
-        version = _resolve_prompt(repo_root, conn, event)
-    if version is None:
-        return
-    _finalize_version(repo_root, version.id, completion_source)
-
-
-def _finalize_version(
-    repo_root: Path, version_id: str, completion_source: str
-) -> bool:
-    """Finalize one exact turn with compare-and-set idempotency."""
-    with store.connect(repo_root) as conn:
-        version = store.get_version(conn, version_id)
-    if version is None or version.type != "prompt" or version.tree_after is not None:
-        return False
-
-    tree_after = git_ops.write_tree(repo_root)
-    diff = git_ops.diff_trees(repo_root, version.tree_before, tree_after)
-    diff_ref = store.write_object(repo_root, diff) if diff.strip() else None
-    current_branch = git_ops.current_branch(repo_root)
-    with store.connect(repo_root) as conn:
-        current = store.get_version(conn, version.id)
-        if current is None or current.tree_after is not None:
-            return False
-        open_now = store.open_prompts(conn)
-        overlap = any(item.id != version.id for item in open_now)
-        branch_changed = current_branch != version.git_branch
-        reason = None
-        if overlap:
-            reason = "overlapping sessions shared one working tree"
-            store.mark_versions_uncertain(
-                conn, [item.id for item in open_now], reason
-            )
-        elif branch_changed:
-            reason = "git branch changed while turn was open"
-        confidence = (
-            "uncertain" if overlap or branch_changed else current.confidence
-        )
-        cursor = conn.execute(
-            "UPDATE versions SET tree_after = ?, diff_ref = ?, confidence = ?, "
-            "confidence_reason = COALESCE(confidence_reason, ?), "
-            "completed_at = ?, completion_source = ?, "
-            "thinking_source = COALESCE(thinking_source, ?) "
-            "WHERE id = ? AND tree_after IS NULL",
-            (
-                tree_after,
-                diff_ref,
-                confidence,
-                reason,
-                datetime.now(timezone.utc).isoformat(),
-                completion_source,
-                store.THINKING_NONE,
-                version.id,
-            ),
-        )
-        conn.commit()
-        return cursor.rowcount == 1
-
-
-def _resolve_prompt(
-    repo_root: Path, conn: sqlite3.Connection, event: dict
-) -> store.Version | None:
     conversation_id, generation_id = _event_identity(event)
-    exact = store.find_prompt_by_turn(conn, conversation_id, generation_id)
-    if exact is not None:
-        if exact.tree_after is not None and conversation_id:
-            collision_fallbacks = [
-                version
-                for version in store.open_prompts(
-                    conn, conversation_id=conversation_id
-                )
-                if version.generation_id is None
-            ]
-            if len(collision_fallbacks) == 1:
-                return collision_fallbacks[0]
-        return exact
-    if conversation_id and generation_id:
-        return None
-    if conversation_id:
-        open_for_session = store.open_prompts(
-            conn, conversation_id=conversation_id
-        )
-        return open_for_session[-1] if open_for_session else None
-    return _legacy_open_prompt(repo_root, conn)
-
-
-def _legacy_open_prompt(
-    repo_root: Path, conn: sqlite3.Connection
-) -> store.Version | None:
-    """Compatibility fallback for hook payloads that carry no turn ids."""
-    branch = git_ops.current_branch(repo_root)
-    head = store.read_head(repo_root, branch, seed=False)
-    if not head:
-        return None
-    version = store.get_version(conn, head)
-    if version and version.type == "prompt" and version.tree_after is None:
-        return version
-    return None
+    hook_capture.finalize_turn(
+        repo_root,
+        conversation_id=conversation_id,
+        generation_id=generation_id,
+        completion_source=completion_source,
+        legacy_fallback=True,
+        reused_key_fallback=True,
+    )
 
 
 def _event_identity(event: dict) -> tuple[str | None, str | None]:

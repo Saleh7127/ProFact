@@ -89,11 +89,20 @@ def start(
     claude: bool = typer.Option(
         False, "--claude", help="Capture Claude Code via the local proxy and launch `claude`."
     ),
+    codex: bool = typer.Option(
+        False, "--codex", help="Install project-local Codex CLI/IDE capture hooks."
+    ),
+    copilot: bool = typer.Option(
+        False, "--copilot", help="Install VS Code GitHub Copilot agent hooks."
+    ),
     port: int = typer.Option(7845, "--port", help="Proxy port (Claude mode only)."),
 ) -> None:
-    """Start capture. Default installs Cursor hooks; --claude runs the Claude proxy."""
+    """Configure capture for Cursor, Claude, Codex, or VS Code Copilot."""
     repo_root = _resolve_repo_root()
     _require_init(repo_root)
+    if sum((claude, codex, copilot)) > 1:
+        typer.echo("error: capture modes are mutually exclusive", err=True)
+        raise typer.Exit(2)
     dangling_count = len(recovery_service.audit(repo_root))
     if dangling_count:
         typer.echo(
@@ -107,6 +116,38 @@ def start(
 
         code = session.run_claude(repo_root, port=port)
         raise typer.Exit(code)
+
+    if codex:
+        from .adapters import codex_hooks
+
+        try:
+            config_rel, runner_rel = codex_hooks.install(repo_root)
+        except (OSError, ValueError) as exc:
+            typer.echo(f"error: could not install Codex hooks: {exc}", err=True)
+            raise typer.Exit(1)
+        typer.echo("profact capture is wired into Codex for this repository.")
+        typer.echo(f"  hooks config: {repo_root / config_rel}")
+        typer.echo(f"  hook runner:  {repo_root / runner_rel}")
+        typer.echo("Open `/hooks` in Codex to review and trust the project hook,")
+        typer.echo("then use Codex CLI or the Codex IDE extension as usual.")
+        return
+
+    if copilot:
+        from .adapters import vscode_copilot_hooks
+
+        try:
+            config_rel, runner_rel = vscode_copilot_hooks.install(repo_root)
+        except (OSError, ValueError) as exc:
+            typer.echo(
+                f"error: could not install VS Code Copilot hooks: {exc}", err=True
+            )
+            raise typer.Exit(1)
+        typer.echo("profact capture is wired into VS Code GitHub Copilot.")
+        typer.echo(f"  hooks config: {repo_root / config_rel}")
+        typer.echo(f"  hook runner:  {repo_root / runner_rel}")
+        typer.echo("VS Code reloads workspace hooks when the file is saved. Use")
+        typer.echo("`Chat: Configure Hooks` or the Copilot Hooks output to verify it.")
+        return
 
     from .adapters import cursor_hooks
 
@@ -158,6 +199,42 @@ def hook() -> None:
         start_dir = Path(roots[0]) if roots else Path.cwd()
         repo_root = git_ops.repo_root(start_dir)
         response = cursor_hooks.handle(repo_root, event)
+    except Exception:
+        response = {}
+    typer.echo(json.dumps(response))
+    raise typer.Exit(0)
+
+
+@app.command(hidden=True)
+def codex_hook() -> None:
+    """Internal: consume one Codex lifecycle hook event. Always fails open."""
+    from .adapters import codex_hooks
+
+    response: dict = {}
+    try:
+        raw = sys.stdin.read()
+        event = json.loads(raw) if raw.strip() else {}
+        start_dir = Path(event.get("cwd") or Path.cwd())
+        repo_root = git_ops.repo_root(start_dir)
+        response = codex_hooks.handle(repo_root, event)
+    except Exception:
+        response = {}
+    typer.echo(json.dumps(response))
+    raise typer.Exit(0)
+
+
+@app.command(hidden=True)
+def copilot_hook() -> None:
+    """Internal: consume one VS Code Copilot agent-hook event. Fails open."""
+    from .adapters import vscode_copilot_hooks
+
+    response: dict = {}
+    try:
+        raw = sys.stdin.read()
+        event = json.loads(raw) if raw.strip() else {}
+        start_dir = Path(event.get("cwd") or Path.cwd())
+        repo_root = git_ops.repo_root(start_dir)
+        response = vscode_copilot_hooks.handle(repo_root, event)
     except Exception:
         response = {}
     typer.echo(json.dumps(response))

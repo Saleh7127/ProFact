@@ -647,6 +647,20 @@ def find_prompt_by_turn(
     return _row_to_version(row) if row else None
 
 
+def latest_prompt_for_conversation(
+    conn: sqlite3.Connection, conversation_id: str | None
+) -> Version | None:
+    """Return the most recently opened prompt for one adapter session."""
+    if not conversation_id:
+        return None
+    row = conn.execute(
+        "SELECT * FROM versions WHERE type = 'prompt' AND conversation_id = ? "
+        "ORDER BY timestamp DESC, rowid DESC LIMIT 1",
+        (conversation_id,),
+    ).fetchone()
+    return _row_to_version(row) if row else None
+
+
 def open_prompts(
     conn: sqlite3.Connection,
     *,

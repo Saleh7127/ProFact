@@ -18,15 +18,30 @@ cd your-repo
 profact init              # set up profact in the current Git repo
 profact start             # capture Cursor via hooks (default)
 profact start --claude    # or capture Claude Code via a local proxy
+profact start --codex     # or install project-local Codex lifecycle hooks
+profact start --copilot   # or install VS Code GitHub Copilot agent hooks
 profact tui               # browse the captured history interactively
 ```
+
+After `profact start --codex`, open `/hooks` in Codex, review the generated
+project hook, and trust it. ProFact captures official `UserPromptSubmit`,
+`Stop`, and `SessionEnd` events; the Codex CLI is the validated path. IDE
+clients must dispatch those same project hooks, so verify the hook appears and
+fires before relying on IDE capture.
+
+After `profact start --copilot`, VS Code automatically loads
+`.github/hooks/profact.json`. Verify it with `Chat: Configure Hooks`, the
+`GitHub Copilot Chat Hooks` output channel, or `Developer: Show Agent Debug
+Logs`. This adapter targets local VS Code agent sessions; remote, background,
+or cloud execution requires ProFact to be installed and configured in that
+execution environment.
 
 ## Commands
 
 | Command | Purpose |
 | --- | --- |
 | `profact init` | Initialize profact in the current repository |
-| `profact start` | Start capturing AI turns (Cursor hooks or `--claude` proxy) |
+| `profact start` | Configure capture (Cursor, `--copilot`, `--codex`, or `--claude`) |
 | `profact log` | Browse version history (`--graph`, `--path`, filters by tag/type/branch/model/file/date/test outcome) |
 | `profact show <id>` | Show a version's prompt, response, and diff |
 | `profact diff [a] [b]` | Diff versions or the working tree (`--stat`, `--name-only`) |
@@ -46,7 +61,8 @@ profact tui               # browse the captured history interactively
 
 ## Crash recovery
 
-If Cursor, Claude, or the machine stops during a turn, inspect it explicitly:
+If Cursor, VS Code Copilot, Codex, Claude, or the machine stops during a turn,
+inspect it explicitly:
 
 ```sh
 profact recover
@@ -92,9 +108,11 @@ needed.
 ## Multiple capture sessions
 
 ProFact routes concurrent Cursor events by `conversation_id` and
-`generation_id`; each Claude proxy launch receives its own durable session id.
-Duplicate prompt/stop hooks are idempotent, late responses return to their
-original turn, and concurrent prompt opens advance branch HEAD atomically.
+`generation_id`, VS Code Copilot events by `session_id` and prompt-hook
+`timestamp`, Codex events by `session_id` and `turn_id`, and each Claude proxy
+launch by its own durable session id. Duplicate prompt/stop hooks are
+idempotent, late responses return to their original turn when the provider
+exposes them, and concurrent prompt opens advance branch HEAD atomically.
 `profact status` and `profact recover` identify every open session on the
 branch. Run simultaneous Claude launches on distinct `--port` values.
 
@@ -107,15 +125,18 @@ isolated worktrees or per-write provenance.
 ## Completion and token telemetry
 
 Each prompt version records when ProFact observed it closing and how it closed
-(for example `cursor-stop`, `claude-session-end`, or recovery). `profact show`
-and the TUI Overview display elapsed wall time from prompt open to observed
-completion.
+(for example `cursor-stop`, `vscode-copilot-stop`, `claude-session-end`, or
+recovery). `profact show` and the TUI Overview display elapsed wall time from
+prompt open to observed completion.
 
 Claude token usage is provider-reported and summed across all API calls absorbed
 into the user prompt, including input, output, cache-read, and cache-creation
-tokens. Cursor currently does not expose trustworthy token usage through hooks,
-so those fields remain `not reported` rather than being estimated. ProFact does
-not calculate monetary cost or guess tokens from saved text.
+tokens. Cursor, Codex, and VS Code Copilot lifecycle hooks currently do not
+expose trustworthy token usage, so those fields remain `not reported` rather
+than being estimated. Codex hooks provide the final response but not model
+reasoning. VS Code Copilot hooks expose neither assistant response, reasoning,
+model, nor usage. ProFact records those fields as unavailable and does not parse
+the unstable transcript or guess from saved text.
 
 ## Interactive history
 

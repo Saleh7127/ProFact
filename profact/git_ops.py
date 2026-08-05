@@ -161,8 +161,15 @@ def blame_porcelain(repo_root: Path, commit: str, rel_path: str) -> str:
 # profact's own infrastructure: never deleted by checkout, and never captured
 # into a snapshot, even if a checked-out version predates these paths or reverts
 # the .gitignore that hides them.
-_PROTECTED_PREFIXES = (".profact/", ".cursor/hooks/")
-_PROTECTED_FILES = (".cursor/hooks.json", "profact.toml")
+_PROTECTED_PREFIXES = (".profact/", ".cursor/hooks/", ".codex/hooks/")
+_PROTECTED_FILES = (
+    ".cursor/hooks.json",
+    ".codex/hooks.json",
+    ".github/hooks/profact.json",
+    ".github/hooks/profact-vscode-hook.sh",
+    ".github/hooks/profact-vscode-hook.cmd",
+    "profact.toml",
+)
 
 # The protected paths as plain repo-relative paths, removed from every snapshot
 # index so they never enter a tree regardless of the current .gitignore state.
@@ -170,6 +177,11 @@ _INFRA_PATTERNS = (
     ".profact/**",
     ".cursor/hooks/**",
     ".cursor/hooks.json",
+    ".codex/hooks/**",
+    ".codex/hooks.json",
+    ".github/hooks/profact.json",
+    ".github/hooks/profact-vscode-hook.sh",
+    ".github/hooks/profact-vscode-hook.cmd",
     "profact.toml",
 )
 

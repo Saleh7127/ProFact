@@ -13,17 +13,20 @@ When developing with Claude Code, a developer iterates through many prompts to b
 Every time you send a prompt to Claude Code, `profact` records the **prompt text, the model configuration, and the exact file changes that resulted**, storing them together as a single **version**. You can move backward and forward through this prompt-driven history like Git commits — except the unit of history is intent + its result.
 
 **Scope:** single user and local machine. The original MVP assumed one active
-session; the current implementation routes multiple Cursor conversations and
-Claude proxy launches by durable session/turn identity. Sessions still share
+session; the current implementation routes multiple Cursor conversations, VS
+Code Copilot sessions, Codex sessions, and Claude proxy launches by durable
+session/turn identity. Sessions still share
 one working tree, so overlapping file intervals are preserved but explicitly
 marked `confidence='uncertain'` rather than assigned to one agent. The project
-being versioned is itself a Git repository. Two capture adapters are in scope:
+being versioned is itself a Git repository. Four capture adapters are built:
 - **Cursor (primary)** — captured via **Cursor Hooks** (`beforeSubmitPrompt`, `afterAgentThought`, `afterAgentResponse`, `afterFileEdit`, `sessionStart`/`sessionEnd`). This matches how the tool is actually used and gives explicit turn boundaries + exact edit attribution. `afterAgentThought` records the model's reasoning ("thinking") when a reasoning model emits it, so a version is a `(prompt → reasoning → response → diff)` unit; turns with no thinking are stamped `thinking_source = 'none'`.
 - **Claude Code (secondary, already built)** — captured via the local HTTP proxy (`ANTHROPIC_BASE_URL`). Kept as a working second adapter to prove the capture interface generalizes.
+- **Codex** — captured via official project lifecycle hooks (`UserPromptSubmit`, `Stop`, `SessionEnd`), keyed by `(session_id, turn_id)`. `Stop.last_assistant_message` supplies the final response. Hook payloads do not expose reasoning or trustworthy token usage, so those fields remain explicitly unavailable.
+- **VS Code GitHub Copilot** — captured via preview workspace agent hooks (`UserPromptSubmit`, `Stop`) in `.github/hooks/profact.json`. Turns are keyed by `(session_id, prompt timestamp)` because VS Code exposes no turn id. The hook contract exposes no assistant response, reasoning, model, or usage, so ProFact leaves those fields unavailable and never parses the unstable transcript.
 
-The adapter-agnostic core (store, git_ops, aggregator, CLI) is shared by both.
+The adapter-agnostic core (store, git_ops, hook lifecycle, aggregator, CLI) is shared by all four.
 
-**Future (not built now):** Copilot / ChatGPT adapters, team collaboration, shared/committed prompt history, replay, and semantic diffing. The architecture should not block these, but none are built in the MVP.
+**Future (not built now):** GitHub Copilot CLI / ChatGPT adapters, team collaboration, shared/committed prompt history, replay, and semantic diffing. The architecture should not block these, but none are built in the MVP.
 
 ---
 
@@ -86,10 +89,11 @@ Claude Code makes multiple API round trips per user-visible prompt (read file �
 - **Validate against reality before locking the parser:** capture a small, anonymized fixture set from real Claude Code traffic (keep roles and content-block types; strip prompt text, file names, secrets, responses) and confirm the rule holds. If the real payload shape differs, update this rule and the fixtures first — do not guess.
 
 ### 4a. Multiple capture sessions
-- Cursor turns are identified by `(conversation_id, generation_id)` and Claude
-    turns by a generated per-launch session id plus turn index. Prompt, thought,
-    response, stop, and late events route to that durable version rather than to
-    whichever version is currently HEAD.
+- Cursor turns are identified by `(conversation_id, generation_id)`, VS Code
+    Copilot turns by `(session_id, prompt timestamp)`, Codex turns by
+    `(session_id, turn_id)`, and Claude turns by a generated per-launch session
+    id plus turn index. Prompt, thought, response, stop, and late events route to
+    that durable version rather than to whichever version is currently HEAD.
 - Opening a prompt and advancing branch HEAD is one SQLite transaction. Duplicate
     prompt/stop deliveries are idempotent, and concurrent version ids are
     serialized.
@@ -110,8 +114,11 @@ Claude Code makes multiple API round trips per user-visible prompt (read file �
 - Claude usage is stored only when reported by Anthropic. Per-call streaming
     usage is cumulative within a response and is merged accordingly; usage from
     separate API calls absorbed into one prompt turn is summed.
-- Cursor token fields remain NULL until Cursor hooks expose provider usage.
-    Missing usage is never represented as zero and is never estimated from text.
+- Cursor, Codex, and VS Code Copilot token fields remain NULL until their
+    lifecycle hooks expose provider usage. VS Code Copilot `response_ref`,
+    `thinking_ref`, and model fields also remain NULL because its documented
+    hooks do not expose them; finalization stamps `thinking_source='none'`.
+    Missing data is never represented as zero or estimated from text.
 - ProFact stores no estimated monetary cost; historical pricing and billing
     policy are outside the version model.
 
@@ -151,7 +158,7 @@ checkout(target_id):
     6. Write target_id into the current Git branch's profact HEAD
 ```
 - **Deletion rule:** only reconcile files that are part of the shadow-index snapshot domain. Files ignored by `.gitignore` are not in these trees and must be **left alone** (e.g. `.env`, build caches, editor files, dependency dirs). A `--clean-ignored` flag may be added later, but MVP checkout preserves ignored local files.
-- **Infrastructure protection:** profact's own capture machinery (`.profact/`, `.cursor/hooks.json`, `.cursor/hooks/`) is hard-protected from deletion during checkout. `.gitignore` is itself versioned, so checking out a version created before `profact start` would otherwise revert the ignore rules and let a subsequent checkout delete the hook files — silently disabling capture. These paths are skipped unconditionally, independent of gitignore state. `profact start` also adds the `.cursor/hooks*` entries to `.gitignore` (they are machine-specific).
+- **Infrastructure protection:** profact's own capture machinery (`.profact/`, `.cursor/hooks.json`, `.cursor/hooks/`, `.codex/hooks.json`, `.codex/hooks/`, and the generated `.github/hooks/profact*` files) is hard-protected from deletion during checkout. `.gitignore` is itself versioned, so checking out a version created before `profact start` would otherwise revert the ignore rules and let a subsequent checkout delete the hook files — silently disabling capture. These paths are skipped unconditionally, independent of gitignore state. `profact start` also adds generated hook entries to `.gitignore` (they are machine-specific).
 
 ### 9. Capture is behind an adapter interface (build one, design for more)
 ```python
@@ -168,11 +175,15 @@ class CaptureAdapter(Protocol):
     def on_event(self, callback: Callable[[CaptureEvent], None]) -> None: ...
     def stop(self) -> None: ...
 ```
-For MVP, implement **two** adapters emitting the same `CaptureEvent`s:
+The implementation has **four** adapters normalized into the same durable version model:
 - `ClaudeCodeProxyAdapter` (built) — local HTTP proxy; turn boundaries via the §4 aggregator, edit attribution via the watcher.
-- `CursorHooksAdapter` (primary, to build) — receives Cursor hook events. Because hooks give explicit boundaries (`beforeSubmitPrompt` opens a turn, `afterAgentResponse` closes it) and exact edits (`afterFileEdit`), this adapter needs neither the heuristic turn-boundary parser nor the time-window watcher for capture — it still snapshots `tree_before`/`tree_after` via `git_ops` so `checkout` works.
+- `CursorHooksAdapter` (primary, built) — receives Cursor hook events. Because hooks give explicit boundaries (`beforeSubmitPrompt` opens a turn, `stop`/`sessionEnd` closes it), this adapter needs neither the heuristic turn-boundary parser nor the time-window watcher for capture — it still snapshots `tree_before`/`tree_after` via `git_ops` so `checkout` works.
+- `CodexHooksAdapter` (built) — receives official Codex lifecycle events. It shares the stateless hook lifecycle with Cursor, uses `last_assistant_message` for the response, emits non-steering `{}` output, and never parses unstable transcript files.
+- `VSCodeCopilotHooksAdapter` (built) — receives VS Code preview agent hooks, uses prompt-hook timestamps for turn identity, emits non-steering `{}` output, and records only fields present in the documented hook payload.
 
-The turn-aggregation logic (§4) lives in a separate `aggregator.py`, not in the adapter, so both adapters reuse the shared core unchanged.
+The Claude turn-aggregation logic (§4) lives in `aggregator.py`; stateless
+Cursor, Codex, and VS Code Copilot hooks share `adapters/hook_capture.py`. Git
+snapshots and the version store remain adapter-independent.
 
 ### 10. Git integration (light touch)
 - Optionally, after a version is associated with a Git commit, write a Git Note: `git notes --ref=profact add -m '{"version_id": "<id>"}' <commit>`.
@@ -249,6 +260,8 @@ matching `v<number>` are reserved; moving an existing tag requires `--force`.
 ```bash
 profact start                   # Cursor mode: install/merge .cursor/hooks.json, run the session the hooks feed
 profact start --claude          # Claude mode: set ANTHROPIC_BASE_URL, launch proxy + watcher, exec `claude`
+profact start --codex           # Codex mode: install/merge .codex/hooks.json, then trust it via /hooks
+profact start --copilot         # VS Code mode: install .github/hooks/profact.json and platform runners
 ```
 Build `adapters/cursor_hooks.py` + a hidden `profact hook` entry point Cursor calls per event (event name read from the stdin payload). Map hook events into the store: `beforeSubmitPrompt` opens a turn + snapshots `tree_before` + advances HEAD; `afterAgentThought` appends the model's reasoning (aggregated across blocks) and marks `thinking_source = 'captured'`; `afterAgentResponse` records the response text; `stop`/`sessionEnd` snapshot `tree_after` + diff, stamp `thinking_source = 'none'` if no thinking arrived, and finalize. `afterFileEdit` is not wired (diffs come from tree snapshots; reserved for future per-edit attribution). No turn-boundary heuristic and no time-window watcher are needed on this path.
 
@@ -283,7 +296,7 @@ Git Notes integration (§10, optional, fires only on commit — document, don't 
 
 ## OUT OF SCOPE — Not Building Now
 
-- Copilot / ChatGPT adapters (interface is ready; adapters are not built)
+- GitHub Copilot CLI / ChatGPT adapters (VS Code Copilot hooks are built)
 - Committed / shared / mergeable `.profact/` history (Decision C); team collaboration
 - Mid-session pull of a branch with foreign history (Decision I)
 - DB compaction / pruning for very long sessions (Decision J)
