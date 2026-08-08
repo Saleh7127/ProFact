@@ -64,7 +64,7 @@ def install(repo_root: Path) -> tuple[str, str]:
     entry = {
         "type": "command",
         "command": f'"{shell_path.as_posix()}"',
-        "commandWindows": f'"{command_path}"',
+        "commandWindows": f'cmd /c "{command_path}"',
     }
     config_rel = ".codex/hooks.json"
     config_path = repo_root / config_rel

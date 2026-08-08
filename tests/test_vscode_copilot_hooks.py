@@ -293,7 +293,7 @@ def test_vscode_copilot_install_merges_and_protects_only_generated_hooks(
             '"./.github/hooks/profact-vscode-hook.sh"'
         )
         assert profact_handlers[0]["windows"] == (
-            '".\\.github\\hooks\\profact-vscode-hook.cmd"'
+            'cmd /c ".\\.github\\hooks\\profact-vscode-hook.cmd"'
         )
         assert profact_handlers[0]["cwd"] == "."
         assert "hooks" not in profact_handlers[0]

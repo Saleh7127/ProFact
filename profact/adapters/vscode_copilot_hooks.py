@@ -17,7 +17,7 @@ import stat
 import sys
 from pathlib import Path
 
-from .. import store
+from .. import privacy, store
 from . import hook_capture
 
 EVENT_PROMPT = "UserPromptSubmit"
@@ -80,9 +80,10 @@ def install(repo_root: Path) -> tuple[str, str]:
     handler = {
         "type": "command",
         "command": f'"./{SHELL_RUNNER_REL}"',
-        "windows": f'".\\{windows_runner}"',
+        "windows": f'cmd /c ".\\{windows_runner}"',
         "cwd": ".",
         "timeout": 30,
+        "env": {"PROFACT_COPILOT_HOOK_DEBUG": "1"},
     }
     for event_name in HANDLED_EVENTS:
         entries = hooks[event_name]
@@ -97,6 +98,7 @@ def install(repo_root: Path) -> tuple[str, str]:
 
 def handle(repo_root: Path, event: dict) -> dict:
     """Apply one VS Code agent-hook event and always return non-steering JSON."""
+    _record_debug_event(repo_root, event)
     if not store.is_initialized(repo_root):
         return {}
 
@@ -131,6 +133,32 @@ def handle(repo_root: Path, event: dict) -> dict:
             )
         hook_capture.reconcile_if_idle(repo_root)
     return {}
+
+
+def _record_debug_event(repo_root: Path, event: dict) -> None:
+    if not os.environ.get("PROFACT_COPILOT_HOOK_DEBUG"):
+        return
+    try:
+        log_path = store.profact_dir(repo_root) / "copilot-hook-events.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        redacted = _redact_debug_value(repo_root, event)
+        with log_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(redacted) + "\n")
+    except Exception:
+        pass
+
+
+def _redact_debug_value(repo_root: Path, value):
+    if isinstance(value, str):
+        return privacy.redact_for(repo_root, value)[0]
+    if isinstance(value, list):
+        return [_redact_debug_value(repo_root, item) for item in value]
+    if isinstance(value, dict):
+        return {
+            key: _redact_debug_value(repo_root, item)
+            for key, item in value.items()
+        }
+    return value
 
 
 def _identity(event: dict) -> tuple[str | None, str | None]:
