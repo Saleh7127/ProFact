@@ -9,7 +9,7 @@ from pathlib import Path
 
 import typer
 
-from . import git_ops, graph_layout, store, testrunner
+from . import git_ops, graph_layout, prompt_text, store, testrunner
 
 _GRAPH_GUTTER = 8
 
@@ -149,6 +149,7 @@ def summary(repo_root: Path, version: store.Version) -> str:
         return "manual edit (no prompt)"
     if version.prompt_ref:
         text = store.read_object(repo_root, version.prompt_ref) or ""
+        text = prompt_text.user_request(text) or ""
         first = text.strip().splitlines()[0] if text.strip() else ""
         return _short(first) or "(empty prompt)"
     return "(no prompt text)"

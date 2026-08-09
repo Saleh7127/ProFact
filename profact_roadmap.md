@@ -3,7 +3,7 @@
 > Status: **living roadmap.** Completed items are marked below; unmarked items
 > remain proposals. This document collects directions to grow the current MVP
 > into a full product and a strong thesis. The MVP already delivers: capture
-> (Cursor hooks + VS Code Copilot hooks + Codex hooks + Claude proxy),
+> (Cursor hooks + VS Code Copilot hooks + Codex and Claude session monitors),
 > including model **reasoning capture** (`afterAgentThought`) alongside each
 > prompt/response/diff, content-addressed storage, a prompt DAG with per-branch
 > carry-over HEADs, safe `checkout`, `log/show/status/diff`, `blame`/`why`,
@@ -297,8 +297,8 @@ deliberately deferred.
 
 ### Done
 
-- [x] Cursor Hooks, VS Code GitHub Copilot agent hooks, Codex lifecycle hooks,
-  and Claude Code proxy capture adapters.
+- [x] Cursor Hooks, VS Code GitHub Copilot agent hooks, and local Codex and
+  Claude Code session-monitoring adapters.
 - [x] Prompt, reasoning, response, model metadata, tree snapshot, and diff
   capture.
 - [x] Content-addressed object storage and SQLite metadata.

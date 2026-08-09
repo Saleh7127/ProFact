@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import codecs
 import json
 import sys
 import threading
@@ -70,7 +71,9 @@ def build_app(emit: Emit, upstream: httpx.AsyncClient) -> Starlette:
 
         async def stream_body():
             try:
-                async for chunk in upstream_response.aiter_raw():
+                # HTTPX decodes gzip/brotli here. We intentionally remove the
+                # upstream Content-Encoding header before forwarding.
+                async for chunk in upstream_response.aiter_bytes():
                     if parser is not None:
                         parser.feed(chunk)
                     elif buffered is not None:
@@ -149,13 +152,17 @@ class ClaudeCodeProxyAdapter:
 
 class _SSEAssistantParser:
     def __init__(self) -> None:
+        self._decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
         self._buffer = ""
         self._text_parts: list[str] = []
         self._model: str | None = None
         self._usage: dict[str, int] = {}
 
     def feed(self, chunk: bytes) -> None:
-        self._buffer += chunk.decode("utf-8", errors="ignore")
+        self._buffer += self._decoder.decode(chunk)
+        self._drain_lines()
+
+    def _drain_lines(self) -> None:
         while "\n" in self._buffer:
             line, self._buffer = self._buffer.split("\n", 1)
             line = line.strip()
@@ -185,6 +192,10 @@ class _SSEAssistantParser:
                 self._text_parts.append(delta.get("text", ""))
 
     def event(self) -> CaptureEvent:
+        self._buffer += self._decoder.decode(b"", final=True)
+        if self._buffer:
+            self._buffer += "\n"
+            self._drain_lines()
         return CaptureEvent(
             role="assistant",
             content_blocks=[{"type": "text", "text": "".join(self._text_parts)}],
@@ -197,7 +208,7 @@ class _SSEAssistantParser:
 def _request_event(body: bytes) -> CaptureEvent | None:
     try:
         data = json.loads(body)
-    except json.JSONDecodeError:
+    except (UnicodeDecodeError, json.JSONDecodeError):
         return None
     messages = data.get("messages")
     if not isinstance(messages, list) or not messages:
@@ -215,7 +226,7 @@ def _request_event(body: bytes) -> CaptureEvent | None:
 def _json_response_event(body: bytes) -> CaptureEvent | None:
     try:
         data = json.loads(body)
-    except json.JSONDecodeError:
+    except (UnicodeDecodeError, json.JSONDecodeError):
         return None
     content = data.get("content")
     if content is None:

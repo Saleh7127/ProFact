@@ -43,3 +43,28 @@ def test_detail_loads_content_test_output_and_placeholders(git_repo: Path) -> No
     assert detail.test_output == "1 passed\n"
     assert detail.section("thinking") == version_detail.NO_THINKING_PLACEHOLDER
     assert detail.section("diff") == "(no file changes)"
+
+
+def test_detail_hides_codex_ide_context_envelope(git_repo: Path) -> None:
+    wrapped = (
+        "# Context from my IDE setup:\n\n"
+        "## Active file: .profact/objects/abc\n\n"
+        "## Open tabs:\n- abc: .profact/objects/abc\n\n"
+        "## My request:\nadd a power function\n"
+    )
+    with store.connect(git_repo) as conn:
+        anchor = store.get_version(conn, "v1")
+        assert anchor is not None
+        version = store.create_version(
+            conn,
+            git_branch="main",
+            parent_id=anchor.id,
+            tree_before=anchor.tree_after or anchor.tree_before,
+            tree_after=anchor.tree_after,
+            prompt_ref=store.write_object(git_repo, wrapped),
+            conversation_id="codex-session",
+            generation_id="turn-1",
+        )
+
+    detail = version_detail.load(git_repo, version, head_id=version.id)
+    assert detail.prompt == "add a power function"

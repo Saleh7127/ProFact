@@ -14,8 +14,8 @@ Every time you send a prompt to Claude Code, `profact` records the **prompt text
 
 **Scope:** single user and local machine. The original MVP assumed one active
 session; the current implementation routes multiple Cursor conversations, VS
-Code Copilot sessions, Codex sessions, and Claude proxy launches by durable
-session/turn identity. Sessions still share
+Code Copilot sessions, and Codex/Claude local sessions by durable session/turn
+identity. Sessions still share
 one working tree, so overlapping file intervals are preserved but explicitly
 marked `confidence='uncertain'` rather than assigned to one agent. The project
 being versioned is itself a Git repository. Four capture adapters are built:

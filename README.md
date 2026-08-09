@@ -17,17 +17,17 @@ Requires Python 3.11+ and Git.
 cd your-repo
 profact init              # set up profact in the current Git repo
 profact start             # capture Cursor via hooks (default)
-profact start --claude    # or capture Claude Code via a local proxy
-profact start --codex     # or install project-local Codex lifecycle hooks
+profact start --claude    # or launch and monitor local Claude Code sessions
+profact start --codex     # or monitor local Codex sessions (keep it running)
 profact start --copilot   # or install VS Code GitHub Copilot agent hooks
 profact tui               # browse the captured history interactively
 ```
 
-After `profact start --codex`, open `/hooks` in Codex, review the generated
-project hook, and trust it. ProFact captures official `UserPromptSubmit`,
-`Stop`, and `SessionEnd` events; the Codex CLI is the validated path. IDE
-clients must dispatch those same project hooks, so verify the hook appears and
-fires before relying on IDE capture.
+`profact start --codex` is a foreground monitor: keep its terminal open while
+using Codex CLI, the Codex VS Code extension, or the ChatGPT/Codex desktop app
+against the local repository. It tails new records from
+`$CODEX_HOME/sessions`, captures only turns started while monitoring, and stops
+with Ctrl+C. Cloud-only tasks are outside this local-filesystem capture path.
 
 After `profact start --copilot`, VS Code automatically loads
 `.github/hooks/profact.json`. Verify it with `Chat: Configure Hooks`, the
@@ -109,12 +109,12 @@ needed.
 
 ProFact routes concurrent Cursor events by `conversation_id` and
 `generation_id`, VS Code Copilot events by `session_id` and prompt-hook
-`timestamp`, Codex events by `session_id` and `turn_id`, and each Claude proxy
-launch by its own durable session id. Duplicate prompt/stop hooks are
+`timestamp`, Codex events by `session_id` and `turn_id`, and Claude Code events
+by `sessionId` and `promptId`. Duplicate prompt/stop events are
 idempotent, late responses return to their original turn when the provider
 exposes them, and concurrent prompt opens advance branch HEAD atomically.
 `profact status` and `profact recover` identify every open session on the
-branch. Run simultaneous Claude launches on distinct `--port` values.
+branch.
 
 All sessions still share the repository's working tree. If their open intervals
 overlap, ProFact preserves each prompt/response and snapshot but marks every
@@ -125,18 +125,17 @@ isolated worktrees or per-write provenance.
 ## Completion and token telemetry
 
 Each prompt version records when ProFact observed it closing and how it closed
-(for example `cursor-stop`, `vscode-copilot-stop`, `claude-session-end`, or
+(for example `cursor-stop`, `vscode-copilot-stop`, `claude-session-monitor`, or
 recovery). `profact show` and the TUI Overview display elapsed wall time from
 prompt open to observed completion.
 
-Claude token usage is provider-reported and summed across all API calls absorbed
-into the user prompt, including input, output, cache-read, and cache-creation
-tokens. Cursor, Codex, and VS Code Copilot lifecycle hooks currently do not
-expose trustworthy token usage, so those fields remain `not reported` rather
-than being estimated. Codex hooks provide the final response but not model
-reasoning. VS Code Copilot hooks expose neither assistant response, reasoning,
-model, nor usage. ProFact records those fields as unavailable and does not parse
-the unstable transcript or guess from saved text.
+Claude and Codex token usage is provider-reported and grouped by their durable
+session turn identifiers. Claude usage is deduplicated across split transcript
+records and summed across the tool loop, including input, output, cache-read,
+and cache-creation tokens. Cursor and VS Code Copilot hooks currently do not
+expose trustworthy usage, so those fields remain `not reported` rather than
+being estimated. VS Code Copilot hooks expose neither assistant response,
+reasoning, model, nor usage; ProFact records those fields as unavailable.
 
 ## Interactive history
 

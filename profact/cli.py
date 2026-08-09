@@ -87,15 +87,19 @@ def init() -> None:
 @app.command()
 def start(
     claude: bool = typer.Option(
-        False, "--claude", help="Capture Claude Code via the local proxy and launch `claude`."
+        False,
+        "--claude",
+        help="Launch Claude Code and monitor its local session transcript.",
     ),
     codex: bool = typer.Option(
-        False, "--codex", help="Install project-local Codex CLI/IDE capture hooks."
+        False,
+        "--codex",
+        help="Monitor local Codex CLI, IDE, and desktop sessions.",
     ),
     copilot: bool = typer.Option(
         False, "--copilot", help="Install VS Code GitHub Copilot agent hooks."
     ),
-    port: int = typer.Option(7845, "--port", help="Proxy port (Claude mode only)."),
+    port: int = typer.Option(7845, "--port", hidden=True),
 ) -> None:
     """Configure capture for Cursor, Claude, Codex, or VS Code Copilot."""
     repo_root = _resolve_repo_root()
@@ -112,24 +116,29 @@ def start(
         )
 
     if claude:
-        from . import session
+        from .adapters import claude_sessions
 
-        code = session.run_claude(repo_root, port=port)
+        _ = port  # Retained as a hidden compatibility option for older scripts.
+        try:
+            code = claude_sessions.run_claude(repo_root, notify=typer.echo)
+        except (OSError, claude_sessions.ClaudeMonitorError) as exc:
+            typer.echo(f"error: could not monitor Claude sessions: {exc}", err=True)
+            raise typer.Exit(1)
         raise typer.Exit(code)
 
     if codex:
-        from .adapters import codex_hooks
+        from .adapters import codex_sessions
 
+        monitor = codex_sessions.CodexSessionMonitor(repo_root, notify=typer.echo)
+        typer.echo("profact is monitoring local Codex turns for this repository.")
+        typer.echo("Keep this command running; press Ctrl+C to stop.")
         try:
-            config_rel, runner_rel = codex_hooks.install(repo_root)
-        except (OSError, ValueError) as exc:
-            typer.echo(f"error: could not install Codex hooks: {exc}", err=True)
+            monitor.run()
+        except KeyboardInterrupt:
+            typer.echo("\nCodex monitoring stopped.")
+        except (OSError, codex_sessions.CodexMonitorError) as exc:
+            typer.echo(f"error: could not monitor Codex sessions: {exc}", err=True)
             raise typer.Exit(1)
-        typer.echo("profact capture is wired into Codex for this repository.")
-        typer.echo(f"  hooks config: {repo_root / config_rel}")
-        typer.echo(f"  hook runner:  {repo_root / runner_rel}")
-        typer.echo("Open `/hooks` in Codex to review and trust the project hook,")
-        typer.echo("then use Codex CLI or the Codex IDE extension as usual.")
         return
 
     if copilot:

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import gzip
+import json
 from pathlib import Path
 
 import httpx
@@ -119,6 +121,24 @@ def test_streaming_usage_is_cumulative_within_one_api_call() -> None:
     assert event.usage == {"input_tokens": 7, "output_tokens": 9}
 
 
+def test_streaming_parser_preserves_utf8_split_across_chunks() -> None:
+    parser = _SSEAssistantParser()
+    payload = json.dumps(
+        {
+            "type": "content_block_delta",
+            "delta": {"type": "text_delta", "text": "Done ✓"},
+        },
+        ensure_ascii=False,
+    ).encode()
+    stream = b"data: " + payload + b"\n"
+    split_at = stream.index("✓".encode()) + 1
+
+    parser.feed(stream[:split_at])
+    parser.feed(stream[split_at:])
+
+    assert parser.event().content_blocks == [{"type": "text", "text": "Done ✓"}]
+
+
 def test_non_streaming_response_exposes_provider_usage() -> None:
     event = _json_response_event(
         b'{"role":"assistant","model":"m","content":[{"type":"text","text":"ok"}],'
@@ -131,3 +151,51 @@ def test_non_streaming_response_exposes_provider_usage() -> None:
         "output_tokens": 6,
         "cache_read_tokens": 2,
     }
+
+
+def test_proxy_decodes_compressed_non_streaming_response() -> None:
+    response_body = json.dumps(
+        {
+            "role": "assistant",
+            "model": "claude-test",
+            "content": [{"type": "text", "text": "Completed ✓"}],
+            "usage": {"input_tokens": 4, "output_tokens": 2},
+        },
+        ensure_ascii=False,
+    ).encode()
+
+    async def scenario() -> None:
+        async def messages(request):
+            return Response(
+                gzip.compress(response_body),
+                media_type="application/json",
+                headers={"content-encoding": "gzip"},
+            )
+
+        upstream_app = Starlette(
+            routes=[Route("/v1/messages", messages, methods=["POST"])]
+        )
+        upstream = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=upstream_app),
+            base_url="http://upstream",
+        )
+        events = []
+        proxy = build_app(events.append, upstream)
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=proxy),
+            base_url="http://proxy",
+        )
+
+        response = await client.post("/v1/messages", json=_prompt_body("test"))
+
+        assert response.status_code == 200
+        assert response.content == response_body
+        assert response.headers.get("content-encoding") is None
+        assert events[-1].role == "assistant"
+        assert events[-1].content_blocks == [
+            {"type": "text", "text": "Completed ✓"}
+        ]
+        await client.aclose()
+        await upstream.aclose()
+
+    asyncio.run(scenario())

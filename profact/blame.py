@@ -27,7 +27,7 @@ import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import git_ops, store
+from . import git_ops, prompt_text, store
 
 _SHA_HEADER = re.compile(r"^([0-9a-f]{40}) \d+ (\d+)")
 
@@ -181,6 +181,7 @@ def origin_label(repo_root: Path, version: store.Version | None) -> str:
         return "auto-checkpoint"
     if version.prompt_ref:
         text = store.read_object(repo_root, version.prompt_ref) or ""
+        text = prompt_text.user_request(text) or ""
         first = next((ln for ln in text.splitlines() if ln.strip()), "")
         return first.strip() or "(empty prompt)"
     return "(no prompt text)"
@@ -245,6 +246,7 @@ def render_show(repo_root: Path, result: BlameResult) -> str:
             if version.prompt_ref
             else None
         )
+        prompt = prompt_text.user_request(prompt)
         if prompt:
             out.append("\nprompt:")
             out.append("\n".join("  " + ln for ln in prompt.splitlines()))

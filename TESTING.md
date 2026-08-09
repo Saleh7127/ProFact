@@ -35,11 +35,13 @@ Expected: all tests pass. Coverage by area:
 | File | What it proves |
 |------|----------------|
 | `test_aggregator.py` | turn-boundary rule (1 user prompt = 1 version) |
-| `test_proxy.py` | Claude proxy forwards + parses SSE, opens one version |
+| `test_proxy.py` | Backward-compatible Claude API proxy forwarding, compression, and SSE parsing |
+| `test_claude_sessions.py` | Claude transcript parsing, exact typed-prompt identity, tool-loop aggregation, usage deduplication, repository routing, and partial JSONL handling |
 | `test_watcher.py` | quiet-period finalize + `human` version creation |
 | `test_cli.py` | `log`/`show`/`status`/`checkout`/`diff`, full branching DoD |
 | `test_cursor_hooks.py` | Cursor hook events → versions; reasoning capture (`afterAgentThought`) + placeholder; `start` installs hooks |
-| `test_codex_hooks.py` | Codex lifecycle events, idempotency, late/session-end routing, privacy, CLI install/merge, and protected hook files |
+| `test_codex_hooks.py` | Backward-compatible Codex lifecycle-hook ingestion and installation |
+| `test_codex_sessions.py` | Live Codex rollout parsing, full metadata, token deltas, repository routing, and foreground CLI monitoring |
 | `test_vscode_copilot_hooks.py` | VS Code Copilot prompt/stop hooks, timestamp identity, unavailable metadata, overlap, privacy, direct config merge, runners, and exact-file protection |
 | `test_phase7.py` | `note` (Git Notes) and `start --claude` wiring |
 | `test_branch_heads.py` | per-branch HEADs, carry-over, cross-branch checkout prompt, `doctor` |
@@ -494,35 +496,43 @@ Requires the `claude` CLI installed and on PATH.
 ```bash
 cd /path/to/your/project
 profact init
-profact start --claude     # starts the proxy on :7845, then launches claude
+profact start --claude     # starts the session monitor, then launches claude
 ```
 
-`profact` sets `ANTHROPIC_BASE_URL` to the local proxy, captures each turn, and
-tears the proxy/watcher down when `claude` exits. Inspect with `profact log` /
-`profact show` as usual. Use `--port` if 7845 is taken.
+`profact` tails Claude Code's local project transcript while the launched CLI is
+running. Only records marked as typed human prompts open versions. Their
+`sessionId` and `promptId` group all assistant messages, tool calls/results,
+provider usage, and the final tree diff into one version; title generation,
+suggestions, metadata, and other internal traffic do not become versions.
+Inspect with `profact log` / `profact show` as usual.
 
 ---
 
 ## 10. Real capture path C — Codex
 
-Codex must support project lifecycle hooks.
-
 ```bash
 cd /path/to/your/project
 profact init
-profact start --codex      # installs .codex/hooks.json plus .sh/.cmd runners
+profact start --codex      # keep this foreground monitor running
 ```
 
-In Codex, open `/hooks`, review the generated project hook, and trust it. Use
-Codex normally; `UserPromptSubmit` opens a version, `Stop` captures
-`last_assistant_message` and the resulting tree, and `SessionEnd` safely closes
-an interrupted open turn. The hook always prints `{}` and never steers or stops
-Codex. It does not read `transcript_path`, estimate tokens, or fabricate model
-reasoning.
+Use Codex CLI, the Codex VS Code extension, or the ChatGPT/Codex desktop app
+normally against that local repository. The monitor tails new append-only
+records from `$CODEX_HOME/sessions`: `task_started` snapshots the starting tree,
+prompt/model/reasoning-summary/token records enrich the open version, and
+`task_complete` stores the final response and resulting tree diff. Public
+assistant commentary and non-empty reasoning summaries populate the thinking
+section; encrypted private reasoning is ignored. Existing completed sessions
+are deliberately baselined and not imported.
 
-The Codex CLI path is covered by the automated adapter contract. An IDE client
-must dispatch the same official project hooks; confirm the hook appears and
-fires in `/hooks` before relying on IDE capture.
+Token values are provider-reported per-turn deltas from Codex's cumulative
+counters. Cached input is included in input, and reasoning output is included
+in output, so those values are displayed but never added twice. Public
+reasoning summaries and visible assistant commentary are captured when present;
+encrypted private reasoning is never stored.
+
+Stop the foreground monitor with Ctrl+C. If it is stopped during a turn, use
+`profact recover` to handle the dangling version before continuing.
 
 ---
 
@@ -604,10 +614,10 @@ recorded real source changes.
 - **Cloud agents not supported.** Cursor cloud agents fire only tool-level
   hooks (no `beforeSubmitPrompt`/`stop`/`sessionEnd`), so capture there is out
   of scope.
-- **Codex hook payload limits.** Codex lifecycle hooks provide the prompt and
-  final assistant message but not model reasoning or trustworthy token usage.
-  ProFact records those fields as unavailable and does not parse the unstable
-  transcript path. Project hooks must be reviewed and trusted through `/hooks`.
+- **Codex local-session scope.** The foreground monitor captures local Codex
+  sessions whose recorded `cwd` resolves to the initialized repository. It does
+  not capture cloud-only tasks whose session and filesystem never exist
+  locally. Encrypted private reasoning remains unavailable by design.
 - **VS Code Copilot hook payload limits.** VS Code supplies prompt, session, and
   lifecycle data but no turn id, assistant response, reasoning, model, or token
   usage. ProFact uses the prompt timestamp as turn identity and leaves missing
@@ -621,8 +631,8 @@ recorded real source changes.
   concurrent file ownership requires isolated worktrees or per-write provenance.
 - **Diffs are tree snapshots, not per-edit.** `afterFileEdit` is intentionally
   not wired; the diff is `git diff <tree_before> <tree_after>`. Exact per-edit
-  attribution is reserved for later. (Claude path uses a watcher quiet-period to
-  decide when to snapshot; very fast successive turns could blur a boundary.)
+  attribution is reserved for later. Claude finalizes on its transcript's
+  explicit turn-duration event.
 - **Mid-turn crash.** If a hook client or the machine dies after prompt submit
   but before stop, the version stays open (`tree_after` NULL). Run `profact
   recover` to inspect it. `--finalize` adopts the current tree only for the
@@ -676,8 +686,9 @@ recorded real source changes.
   (`GIT_INDEX_FILE`), so your real staging area is never touched.
 - **Long sessions grow the DB.** No compaction/pruning of `.profact/history.db`
   or the object store yet (acceptable for thesis-scale use).
-- **HTTPS/corporate proxies.** The Claude proxy does clean forwarding to
-  `api.anthropic.com` only; custom SSL/enterprise gateways are not handled.
+- **Private transcript schemas.** Claude and Codex local JSONL formats can
+  evolve. Their parsers ignore unknown records, process only complete lines,
+  and are covered by fixture-driven compatibility tests.
 
 ### Out of scope for the MVP (by design)
 GitHub Copilot CLI/ChatGPT adapters, shared/mergeable history, mid-session pull

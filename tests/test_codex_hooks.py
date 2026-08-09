@@ -260,11 +260,9 @@ def test_codex_install_merges_idempotently_and_protects_infrastructure(
         )
     )
 
-    first = runner.invoke(app, ["start", "--codex"])
-    second = runner.invoke(app, ["start", "--codex"])
-    assert first.exit_code == 0, first.output
-    assert second.exit_code == 0, second.output
-    assert "review and trust" in first.output
+    first = codex_hooks.install(git_repo)
+    second = codex_hooks.install(git_repo)
+    assert first == second
 
     config = json.loads(config_path.read_text())
     assert config["hooks"]["PostToolUse"][0]["hooks"][0]["command"] == "echo existing"
@@ -323,10 +321,12 @@ def test_codex_install_preserves_malformed_existing_config(
     original = "{not valid JSON\n"
     config_path.write_text(original)
 
-    result = runner.invoke(app, ["start", "--codex"])
-
-    assert result.exit_code == 1
-    assert "invalid Codex hooks JSON" in result.output
+    try:
+        codex_hooks.install(git_repo)
+    except ValueError as exc:
+        assert "invalid Codex hooks JSON" in str(exc)
+    else:
+        raise AssertionError("invalid Codex hooks JSON was accepted")
     assert config_path.read_text() == original
 
 

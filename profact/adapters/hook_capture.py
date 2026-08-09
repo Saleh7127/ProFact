@@ -6,7 +6,7 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .. import git_ops, human_edits, store
+from .. import git_ops, human_edits, prompt_text, store
 
 OVERLAP_REASON = "overlapping sessions shared one working tree"
 LATE_EVENT_REASON = "capture event arrived after turn finalization"
@@ -99,6 +99,77 @@ def append_thinking(
     )
 
 
+def attach_prompt(
+    repo_root: Path,
+    *,
+    conversation_id: str,
+    generation_id: str,
+    text: str,
+) -> store.Version | None:
+    """Attach a prompt that arrived just after its start-of-turn snapshot."""
+    if not text:
+        return None
+    prompt_ref = store.write_object(repo_root, text)
+    with store.connect(repo_root) as conn:
+        version = store.find_prompt_by_turn(conn, conversation_id, generation_id)
+        if version is None:
+            return None
+        existing = (
+            store.read_object(repo_root, version.prompt_ref)
+            if version.prompt_ref
+            else None
+        )
+        if prompt_text.user_request(existing):
+            return version
+        conn.execute(
+            "UPDATE versions SET prompt_ref = ? WHERE id = ?",
+            (prompt_ref, version.id),
+        )
+        conn.commit()
+        return store.get_version(conn, version.id)
+
+
+def update_metadata(
+    repo_root: Path,
+    *,
+    conversation_id: str,
+    generation_id: str,
+    model: str | None = None,
+    usage: dict[str, int] | None = None,
+) -> store.Version | None:
+    """Persist provider-reported model and per-turn usage."""
+    usage = usage or {}
+    with store.connect(repo_root) as conn:
+        version = store.find_prompt_by_turn(conn, conversation_id, generation_id)
+        if version is None:
+            return None
+        conn.execute(
+            """
+            UPDATE versions
+            SET model = COALESCE(model, ?),
+                input_tokens = COALESCE(?, input_tokens),
+                output_tokens = COALESCE(?, output_tokens),
+                cache_read_tokens = COALESCE(?, cache_read_tokens),
+                cache_creation_tokens = COALESCE(?, cache_creation_tokens),
+                reasoning_tokens = COALESCE(?, reasoning_tokens),
+                api_call_count = COALESCE(?, api_call_count)
+            WHERE id = ?
+            """,
+            (
+                model,
+                usage.get("input_tokens"),
+                usage.get("output_tokens"),
+                usage.get("cache_read_tokens"),
+                usage.get("cache_creation_tokens"),
+                usage.get("reasoning_tokens"),
+                usage.get("api_call_count"),
+                version.id,
+            ),
+        )
+        conn.commit()
+        return store.get_version(conn, version.id)
+
+
 def append_response(
     repo_root: Path,
     *,
@@ -131,6 +202,7 @@ def finalize_turn(
     conversation_id: str | None,
     generation_id: str | None,
     completion_source: str,
+    completed_at: str | None = None,
     legacy_fallback: bool = False,
     reused_key_fallback: bool = False,
 ) -> bool:
@@ -144,12 +216,16 @@ def finalize_turn(
             reused_key_fallback=reused_key_fallback,
         )
     return bool(version) and finalize_version(
-        repo_root, version.id, completion_source
+        repo_root, version.id, completion_source, completed_at=completed_at
     )
 
 
 def finalize_version(
-    repo_root: Path, version_id: str, completion_source: str
+    repo_root: Path,
+    version_id: str,
+    completion_source: str,
+    *,
+    completed_at: str | None = None,
 ) -> bool:
     """Finalize one exact turn with compare-and-set idempotency."""
     with store.connect(repo_root) as conn:
@@ -190,7 +266,7 @@ def finalize_version(
                 diff_ref,
                 confidence,
                 reason,
-                datetime.now(timezone.utc).isoformat(),
+                completed_at or datetime.now(timezone.utc).isoformat(),
                 completion_source,
                 store.THINKING_NONE,
                 version.id,
