@@ -4,12 +4,29 @@ Prompt-native version control for AI-assisted ("vibe") coding. ProFact records e
 
 ## Install
 
+ProFact requires Python 3.11+ and Git. To install it from a fresh checkout in
+an isolated environment:
+
 ```sh
-pip install -e .          # from the repo root
-pip install -e .[dev]     # with test dependencies
+git clone https://github.com/Saleh7127/ProFact.git
+cd ProFact
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e .
 ```
 
-Requires Python 3.11+ and Git.
+On Windows PowerShell, activate the environment with:
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+```
+
+Contributors and evaluators should install the test dependencies instead:
+
+```sh
+python -m pip install -e ".[dev]"
+python -m pytest -q
+```
 
 ## Quick start
 
@@ -41,23 +58,41 @@ execution environment.
 | Command | Purpose |
 | --- | --- |
 | `profact init` | Initialize profact in the current repository |
-| `profact start` | Configure capture (Cursor, `--copilot`, `--codex`, or `--claude`) |
-| `profact log` | Browse version history (`--graph`, `--path`, filters by tag/type/branch/model/file/date/test outcome) |
-| `profact show <id>` | Show a version's prompt, response, and diff |
-| `profact diff [a] [b]` | Diff versions or the working tree (`--stat`, `--name-only`) |
+| `profact start` | Configure Cursor capture hooks (default) |
+| `profact start --claude` | Launch Claude Code and monitor its local session transcript |
+| `profact start --codex` | Monitor local Codex CLI, IDE, and desktop sessions |
+| `profact start --copilot` | Install VS Code GitHub Copilot agent hooks |
+| `profact log` | Browse version history (`--graph`, `--path`, `--tests`; filters: `--tag`, `--type`, `--branch`, `--model`, `--file`, `--since`, `--test-status`) |
+| `profact show <id>` | Show a version's metadata, prompt, thinking, response, and diff |
+| `profact show <id> prompt` | Show only the prompt section |
+| `profact show <id> thinking` | Show only the thinking/reasoning section |
+| `profact show <id> response` | Show only the response section |
+| `profact show <id> diff` | Show only the diff section |
+| `profact diff` | Diff HEAD against the working tree |
+| `profact diff <a>` | Diff a version against the working tree |
+| `profact diff <a> <b>` | Diff two versions (`--stat`, `--name-only`, `--exit-code`) |
 | `profact blame <file>` | Attribute lines to the prompts that produced them (`-L`, `--show`) |
+| `profact blame <file> <id>` | Blame a file at a specific version |
 | `profact why <file:line>` | Explain why a specific line exists |
-| `profact test -- <cmd>` | Run a test command and attach the result to a version |
-| `profact bisect --good <id> -- <cmd>` | Find the first version that broke a test |
-| `profact tag` | Label, list, move, or delete version tags |
-| `profact checkout <id>` | Restore the working tree to a version |
-| `profact note <commit>` | Annotate a Git commit with its version |
+| `profact why <file:line> <id>` | Explain a line at a specific version |
+| `profact test -- <cmd>` | Run a test command and attach the result to HEAD (`--version` to target another) |
+| `profact bisect --good <id> -- <cmd>` | Find the first version that broke a test (`--bad` defaults to HEAD) |
+| `profact tag` | List all tags |
+| `profact tag <id> <label>` | Create a tag (`--force` / `-f` to move an existing tag) |
+| `profact tag --delete <label>` | Delete a tag (`-d`) |
+| `profact checkout <id>` | Restore the working tree to a version (`--force` skips cross-branch confirm) |
+| `profact snapshot` | Capture pending manual working-tree changes as one human version |
+| `profact note <commit>` | Annotate a Git commit with HEAD (`profact note <commit> <id>` for a specific version) |
 | `profact status` | Show capture and HEAD status |
 | `profact health` | Summarize captured activity, tests, churn, and history attention |
 | `profact tui` | Browse captured history in an interactive terminal UI |
-| `profact recover` | Inspect and recover prompt turns interrupted before finalization |
-| `profact privacy scan` | Report masked secrets in stored history (`--fix` redacts them) |
-| `profact doctor` | Check (and `--fix`) the profact store |
+| `profact recover` | List prompt turns interrupted before finalization |
+| `profact recover <id> --finalize` | Adopt the current working tree as that turn's artifact |
+| `profact recover <id> --preserve` | Close incomplete without attributing current files |
+| `profact privacy scan` | Report masked secrets in stored history |
+| `profact privacy scan --fix` | Redact detected secrets in stored objects |
+| `profact doctor` | Check the profact store |
+| `profact doctor --fix` | Apply safe repairs (prune phantoms, orphans, dangling tags) |
 
 ## Crash recovery
 
@@ -148,15 +183,79 @@ and `?` for the complete keyboard reference.
 Selecting a version does not move ProFact HEAD or change files. Checkout and
 tag mutation remain CLI operations while their guarded TUI workflows are built.
 
-## Testing
+## Testing and reproducing a revision
+
+For a normal test of the current checkout, activate its virtual environment and
+run:
 
 ```sh
-pytest
+python -m pytest -q
 ```
 
-See [TESTING.md](TESTING.md) for details, [profact_spec.md](profact_spec.md) for
-the full design, [profact_tui_spec.md](profact_tui_spec.md) for the terminal UI
-contract, and [profact_roadmap.md](profact_roadmap.md) for planned work.
+All tests should pass. The thesis evaluation environment currently collects 215
+tests; a later revision may contain a different number.
+
+To reproduce a particular published revision, use its evaluation tag or full
+commit hash rather than the moving default branch:
+
+```sh
+git clone https://github.com/Saleh7127/ProFact.git
+cd ProFact
+git fetch --tags
+git switch --detach <tag-or-full-commit-hash>
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e ".[dev]"
+python -m pytest -q
+```
+
+Record the source and environment together with the result:
+
+```sh
+git rev-parse HEAD
+git status --short
+python --version
+git --version
+python -c "import profact; print(profact.__version__)"
+python -m pip freeze
+python -m pytest -q
+```
+
+`git status --short` should be empty for a clean reproduction. The commit hash,
+Python and Git versions, dependency list, operating system and hardware, and
+complete test result form the minimum reproduction record.
+
+### Creating an evaluation freeze
+
+A freeze is only needed before collecting results that must remain reproducible;
+ordinary users do not need to create one. A project maintainer should:
+
+1. Commit the implementation, evaluation protocol, runbook, and analysis scripts.
+2. Confirm the worktree is clean and the complete test suite passes.
+3. Create an annotated tag at that exact commit, such as `eval-freeze-v1`.
+4. Push the commit and tag to the public repository.
+5. Archive the environment record and raw test output with the evaluation data.
+
+Example maintainer commands:
+
+```sh
+git remote get-url origin
+git status --short
+python -m pytest -q
+git tag -a eval-freeze-v1 -m "Frozen revision for thesis evaluation"
+git push origin eval-freeze-v1
+```
+
+Before pushing, confirm that `origin` is the intended public ProFact repository.
+
+If the implementation changes after data collection starts, create a new tag
+such as `eval-freeze-v2`, record the reason, and rerun every affected experiment.
+Do not silently combine results produced by different revisions.
+
+See [TESTING.md](TESTING.md) for the full manual and adapter test guide,
+[profact_spec.md](profact_spec.md) for the design,
+[profact_tui_spec.md](profact_tui_spec.md) for the terminal UI contract, and
+[profact_roadmap.md](profact_roadmap.md) for planned work.
 
 ## License
 
