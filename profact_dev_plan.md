@@ -90,7 +90,10 @@ Build the read/navigate commands first; they touch only `store` + `git_ops` and 
 - **Exit test:** a real Cursor prompt that edits files produces exactly one `prompt` version with correct `tree_before`/`tree_after` and diff; `log`/`show`/`checkout` (Phase 5) operate on it unchanged. **DONE** — validated via unit tests + an end-to-end run piping hook JSON through the generated `.cursor/hooks/profact-hook.sh`.
 
 ## Phase 7 — `start` for Claude + polish (spec Phase 6) — DONE
-- `profact start --claude [--port]`: set `ANTHROPIC_BASE_URL`, launch proxy + watcher, run `claude` as a subprocess, clean up on exit (idle-check thread + flush/stop in `finally`; no orphaned port). Errors clearly if the `claude` binary is absent.
+- `profact start --claude`: launch `claude` with a local transcript monitor,
+  grouping typed prompts and complete tool loops by Claude's durable
+  `sessionId`/`promptId`. The earlier API proxy remains covered as compatibility
+  infrastructure but is not used for turn boundaries.
 - `profact note <commit> [version]`: optional Git Notes link (`git notes --ref=profact`), defaults to HEAD. Light touch, fires only when the user asks.
 - **Exit:** DoD passes via the Cursor path (Phase 6) and the Claude path (proxy tests + `run_claude` wiring test). 29 tests green.
 

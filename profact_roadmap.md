@@ -3,7 +3,7 @@
 > Status: **living roadmap.** Completed items are marked below; unmarked items
 > remain proposals. This document collects directions to grow the current MVP
 > into a full product and a strong thesis. The MVP already delivers: capture
-> (Cursor hooks + Claude proxy),
+> (Cursor hooks + VS Code Copilot hooks + Codex and Claude session monitors),
 > including model **reasoning capture** (`afterAgentThought`) alongside each
 > prompt/response/diff, content-addressed storage, a prompt DAG with per-branch
 > carry-over HEADs, safe `checkout`, `log/show/status/diff`, `blame`/`why`,
@@ -124,8 +124,8 @@ Effort/Impact are rough (Low / Med / High). ★ = strong thesis contribution.
   and paper artifacts. *Impact: Med · Effort: Med.*
 
 ### 3.5 Integrations (adapters & ecosystem)
-- **More capture adapters** — Aider, Continue, Windsurf, Copilot, Cursor CLI, a
-  generic OpenAI-compatible proxy, Anthropic SDK proxy. Delivers the
+- **More capture adapters** — Aider, Continue, Windsurf, GitHub Copilot CLI,
+  Cursor CLI, a generic OpenAI-compatible proxy, Anthropic SDK proxy. Delivers the
   IDE/CLI-agnostic promise. *Impact: Very High · Effort: High.*
 - **Test-runner hooks** — ✅ **implemented.** `profact test -- <cmd>` runs a test
   command and records pass/fail/error on a version (content-addressed output),
@@ -135,7 +135,8 @@ Effort/Impact are rough (Low / Med / High). ★ = strong thesis contribution.
 - **Richer model metadata** — provider, model version, temperature, tools,
   context size, token counts (where available). Provider-reported Claude token
   totals, API-call count, completion timestamp/source, and wall duration are
-  implemented; unavailable Cursor usage remains explicitly unknown. ✅
+  implemented; unavailable Cursor/Codex/VS Code Copilot hook usage remains
+  explicitly unknown. ✅
   *Impact: High · Effort: Med.*
 - **Smarter Git-commit linking** — suggest attaching a whole prompt chain to a
   commit, not just current HEAD. *Impact: High · Effort: Med.*
@@ -296,7 +297,8 @@ deliberately deferred.
 
 ### Done
 
-- [x] Cursor Hooks and Claude Code proxy capture adapters.
+- [x] Cursor Hooks, VS Code GitHub Copilot agent hooks, and local Codex and
+  Claude Code session-monitoring adapters.
 - [x] Prompt, reasoning, response, model metadata, tree snapshot, and diff
   capture.
 - [x] Content-addressed object storage and SQLite metadata.
@@ -316,12 +318,12 @@ deliberately deferred.
   topology, and attention findings.
 - [x] Privacy controls with default secret redaction, configurable private
   paths/custom patterns, and masked historical scan/remediation.
-- [x] Reliable multi-session event routing with durable Cursor/Claude turn
-  identities, idempotent hooks, atomic branch ordering, and honest overlap and
-  branch-switch attribution warnings.
+- [x] Reliable multi-session event routing with durable
+  Cursor/Copilot/Codex/Claude turn identities, idempotent hooks, atomic branch
+  ordering, and honest overlap and branch-switch attribution warnings.
 - [x] Per-prompt completion timestamp/source and provider-reported Claude input,
-  output, cache, and API-call usage; no guessed Cursor tokens or mutable cost
-  estimates.
+  output, cache, and API-call usage; no guessed Cursor/Codex/Copilot tokens or
+  mutable cost estimates.
 
 ### Completed milestone — make existing history immediately useful
 

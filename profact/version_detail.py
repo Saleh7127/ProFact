@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from . import store
+from . import prompt_text, store
 
 NO_THINKING_PLACEHOLDER = (
     "(no reasoning captured — the model has no thinking capability, "
@@ -58,7 +58,7 @@ def load(
         tags=tags,
         test_result=test_result,
         test_output=_read(repo_root, test_result.output_ref) if test_result else None,
-        prompt=_read(repo_root, version.prompt_ref),
+        prompt=prompt_text.user_request(_read(repo_root, version.prompt_ref)),
         thinking=_read(repo_root, version.thinking_ref),
         response=_read(repo_root, version.response_ref),
         diff=_read(repo_root, version.diff_ref),
@@ -86,6 +86,7 @@ def usage_text(version: store.Version) -> str | None:
         version.output_tokens,
         version.cache_read_tokens,
         version.cache_creation_tokens,
+        version.reasoning_tokens,
         version.api_call_count,
     )
     if all(value is None for value in values):
@@ -96,6 +97,7 @@ def usage_text(version: store.Version) -> str | None:
         ("output", version.output_tokens),
         ("cache-read", version.cache_read_tokens),
         ("cache-write", version.cache_creation_tokens),
+        ("reasoning", version.reasoning_tokens),
         ("api-calls", version.api_call_count),
     ):
         if value is not None:

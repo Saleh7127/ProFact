@@ -35,10 +35,14 @@ Expected: all tests pass. Coverage by area:
 | File | What it proves |
 |------|----------------|
 | `test_aggregator.py` | turn-boundary rule (1 user prompt = 1 version) |
-| `test_proxy.py` | Claude proxy forwards + parses SSE, opens one version |
+| `test_proxy.py` | Backward-compatible Claude API proxy forwarding, compression, and SSE parsing |
+| `test_claude_sessions.py` | Claude transcript parsing, exact typed-prompt identity, tool-loop aggregation, usage deduplication, repository routing, and partial JSONL handling |
 | `test_watcher.py` | quiet-period finalize + `human` version creation |
 | `test_cli.py` | `log`/`show`/`status`/`checkout`/`diff`, full branching DoD |
 | `test_cursor_hooks.py` | Cursor hook events → versions; reasoning capture (`afterAgentThought`) + placeholder; `start` installs hooks |
+| `test_codex_hooks.py` | Backward-compatible Codex lifecycle-hook ingestion and installation |
+| `test_codex_sessions.py` | Live Codex rollout parsing, full metadata, token deltas, repository routing, and foreground CLI monitoring |
+| `test_vscode_copilot_hooks.py` | VS Code Copilot prompt/stop hooks, timestamp identity, unavailable metadata, overlap, privacy, direct config merge, runners, and exact-file protection |
 | `test_phase7.py` | `note` (Git Notes) and `start --claude` wiring |
 | `test_branch_heads.py` | per-branch HEADs, carry-over, cross-branch checkout prompt, `doctor` |
 | `test_blame.py` | line→version attribution, reverts/re-adds, branch ancestry, `blame`/`why` |
@@ -492,16 +496,77 @@ Requires the `claude` CLI installed and on PATH.
 ```bash
 cd /path/to/your/project
 profact init
-profact start --claude     # starts the proxy on :7845, then launches claude
+profact start --claude     # starts the session monitor, then launches claude
 ```
 
-`profact` sets `ANTHROPIC_BASE_URL` to the local proxy, captures each turn, and
-tears the proxy/watcher down when `claude` exits. Inspect with `profact log` /
-`profact show` as usual. Use `--port` if 7845 is taken.
+`profact` tails Claude Code's local project transcript while the launched CLI is
+running. Only records marked as typed human prompts open versions. Their
+`sessionId` and `promptId` group all assistant messages, tool calls/results,
+provider usage, and the final tree diff into one version; title generation,
+suggestions, metadata, and other internal traffic do not become versions.
+Inspect with `profact log` / `profact show` as usual.
 
 ---
 
-## 10. Optional — link a version to a Git commit
+## 10. Real capture path C — Codex
+
+```bash
+cd /path/to/your/project
+profact init
+profact start --codex      # keep this foreground monitor running
+```
+
+Use Codex CLI, the Codex VS Code extension, or the ChatGPT/Codex desktop app
+normally against that local repository. The monitor tails new append-only
+records from `$CODEX_HOME/sessions`: `task_started` snapshots the starting tree,
+prompt/model/reasoning-summary/token records enrich the open version, and
+`task_complete` stores the final response and resulting tree diff. Public
+assistant commentary and non-empty reasoning summaries populate the thinking
+section; encrypted private reasoning is ignored. Existing completed sessions
+are deliberately baselined and not imported.
+
+Token values are provider-reported per-turn deltas from Codex's cumulative
+counters. Cached input is included in input, and reasoning output is included
+in output, so those values are displayed but never added twice. Public
+reasoning summaries and visible assistant commentary are captured when present;
+encrypted private reasoning is never stored.
+
+Stop the foreground monitor with Ctrl+C. If it is stopped during a turn, use
+`profact recover` to handle the dangling version before continuing.
+
+---
+
+## 11. Real capture path D — VS Code GitHub Copilot
+
+VS Code agent hooks are a preview feature and can be disabled by organization
+policy.
+
+```bash
+cd /path/to/your/project
+profact init
+profact start --copilot   # installs .github/hooks/profact.json + .sh/.cmd runners
+```
+
+VS Code reloads workspace hook files when they are saved. Verify ProFact under
+`Chat: Configure Hooks`, in the `GitHub Copilot Chat Hooks` output channel, or
+with `Developer: Show Agent Debug Logs`, then use a local Copilot agent session
+normally. `UserPromptSubmit` opens a version and `Stop` captures the resulting
+tree. The hook always prints `{}` and never blocks, continues, or modifies the
+agent. If another Stop hook continues the agent, the later
+`stop_hook_active=true` event refreshes the same version when continuation edits
+changed the tree.
+
+VS Code supplies a session id but no turn id, so ProFact uses the prompt-hook
+timestamp as the durable turn key. The current hook contract does not expose
+assistant response text, model reasoning, model identity, or token usage; these
+remain unavailable. ProFact does not parse `transcript_path`. Remote,
+background, and cloud execution require ProFact and its generated runner to
+exist in that execution environment and are not covered by the local adapter
+test contract.
+
+---
+
+## 12. Optional — link a version to a Git commit
 
 ```bash
 git commit -m "ship login"
@@ -511,7 +576,7 @@ git notes --ref=profact show HEAD
 
 ---
 
-## 11. Maintenance — `profact doctor`
+## 13. Maintenance — `profact doctor`
 
 `doctor` scans `.profact/history.db` for safe-to-remove artifacts and reports
 them. It changes nothing unless you pass `--fix`.
@@ -524,7 +589,8 @@ profact doctor --fix      # prune the safe items it found
 It looks for:
 
 - **Phantom checkpoints** — `checkpoint` versions whose diff is empty or touches
-  only profact's own infrastructure (`.profact/`, `.cursor/hooks*`). These are
+  only profact's own infrastructure (`.profact/`, `.cursor/hooks*`,
+  `.codex/hooks*`, or generated `.github/hooks/profact*` files). These are
   artifacts of an older snapshot bug; `--fix` rewires any children onto the
   checkpoint's parent, moves any HEAD off it, and deletes it.
 - **Orphaned objects** — blobs under `.profact/objects/` no longer referenced by
@@ -548,6 +614,16 @@ recorded real source changes.
 - **Cloud agents not supported.** Cursor cloud agents fire only tool-level
   hooks (no `beforeSubmitPrompt`/`stop`/`sessionEnd`), so capture there is out
   of scope.
+- **Codex local-session scope.** The foreground monitor captures local Codex
+  sessions whose recorded `cwd` resolves to the initialized repository. It does
+  not capture cloud-only tasks whose session and filesystem never exist
+  locally. Encrypted private reasoning remains unavailable by design.
+- **VS Code Copilot hook payload limits.** VS Code supplies prompt, session, and
+  lifecycle data but no turn id, assistant response, reasoning, model, or token
+  usage. ProFact uses the prompt timestamp as turn identity and leaves missing
+  fields unavailable. Hooks are a preview feature and may be disabled by
+  organization policy. Local sessions are the validated path; other execution
+  hosts need their own ProFact installation and setup.
 - **Concurrent sessions share one working tree.** Prompt/thought/response/stop
   events route reliably by session and turn identity, and duplicate hooks are
   idempotent. If open intervals overlap, both versions are marked uncertain
@@ -555,10 +631,10 @@ recorded real source changes.
   concurrent file ownership requires isolated worktrees or per-write provenance.
 - **Diffs are tree snapshots, not per-edit.** `afterFileEdit` is intentionally
   not wired; the diff is `git diff <tree_before> <tree_after>`. Exact per-edit
-  attribution is reserved for later. (Claude path uses a watcher quiet-period to
-  decide when to snapshot; very fast successive turns could blur a boundary.)
-- **Mid-turn crash.** If Cursor/the machine dies after `beforeSubmitPrompt` but
-  before `stop`, the version stays open (`tree_after` NULL). Run `profact
+  attribution is reserved for later. Claude finalizes on its transcript's
+  explicit turn-duration event.
+- **Mid-turn crash.** If a hook client or the machine dies after prompt submit
+  but before stop, the version stays open (`tree_after` NULL). Run `profact
   recover` to inspect it. `--finalize` adopts the current tree only for the
   current branch HEAD and marks attribution uncertain; `--preserve` closes any
   dangling turn as incomplete without touching files, so pending changes can
@@ -591,17 +667,17 @@ recorded real source changes.
   left untouched. There is no `--clean-ignored` yet.
 
 ### Conflicts / sharp edges to be aware of
-- **Hook runner is environment-pinned.** `profact start` writes
-  `.cursor/hooks/profact-hook.sh` referencing the **current Python interpreter**
-  and this repo's path (via `PYTHONPATH`). If you move the checkout or change
-  envs, re-run `profact start`. The generated `.cursor/` hook files are
-  machine-specific and not meant to be committed for others — `start` adds
-  `.cursor/hooks.json` and `.cursor/hooks/` to `.gitignore` automatically.
+- **Hook runners are environment-pinned.** `profact start` writes Cursor,
+  Codex, or VS Code Copilot runners referencing the **current Python
+  interpreter** and this repo's path (via `PYTHONPATH`). If you move the ProFact
+  installation or change environments, re-run the matching `profact start`
+  command. Generated hook files are machine-specific and ignored automatically.
 - **Checkout never deletes the hooks, and snapshots never capture them.** Because
   `.gitignore` is itself versioned, checking out a version created *before*
-  `profact start` restores an old `.gitignore` without the `.cursor` entries.
-  profact hard-protects its own infrastructure (`.profact/`, `.cursor/hooks.json`,
-  `.cursor/hooks/`) on two fronts, regardless of gitignore state: (1) `checkout`
+  `profact start` restores an old `.gitignore` without the hook entries.
+  profact hard-protects its own infrastructure (`.profact/`, `.cursor/hooks*`,
+  `.codex/hooks*`, and generated `.github/hooks/profact*` files) on two fronts,
+  regardless of gitignore state: (1) `checkout`
   never deletes it, and (2) `write_tree` removes it from every snapshot. Without
   (2), a checkout would re-capture the (undeletable) hook files, drift the tree,
   and invent phantom `checkpoint` versions from work you never did.
@@ -610,11 +686,12 @@ recorded real source changes.
   (`GIT_INDEX_FILE`), so your real staging area is never touched.
 - **Long sessions grow the DB.** No compaction/pruning of `.profact/history.db`
   or the object store yet (acceptable for thesis-scale use).
-- **HTTPS/corporate proxies.** The Claude proxy does clean forwarding to
-  `api.anthropic.com` only; custom SSL/enterprise gateways are not handled.
+- **Private transcript schemas.** Claude and Codex local JSONL formats can
+  evolve. Their parsers ignore unknown records, process only complete lines,
+  and are covered by fixture-driven compatibility tests.
 
 ### Out of scope for the MVP (by design)
-Copilot/ChatGPT adapters, shared/mergeable history, mid-session pull of a
-foreign branch, semantic prompt diffing, `replay`, and any GUI. (`profact diff`,
-`blame`/`why`, and `bisect` are now implemented — see sections 3, 5, and 6.) The
-architecture leaves room for the rest but does not implement them.
+GitHub Copilot CLI/ChatGPT adapters, shared/mergeable history, mid-session pull
+of a foreign branch, semantic prompt diffing, `replay`, and any GUI. (`profact
+diff`, `blame`/`why`, and `bisect` are now implemented — see sections 3, 5, and
+6.) The architecture leaves room for the rest but does not implement them.

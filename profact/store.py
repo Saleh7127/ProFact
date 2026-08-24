@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS versions (
     output_tokens INTEGER,
     cache_read_tokens INTEGER,
     cache_creation_tokens INTEGER,
+    reasoning_tokens INTEGER,
     api_call_count INTEGER
 );
 
@@ -116,6 +117,7 @@ _MIGRATION_COLUMNS = (
     ("output_tokens", "INTEGER"),
     ("cache_read_tokens", "INTEGER"),
     ("cache_creation_tokens", "INTEGER"),
+    ("reasoning_tokens", "INTEGER"),
     ("api_call_count", "INTEGER"),
 )
 
@@ -147,6 +149,7 @@ class Version:
     output_tokens: int | None = None
     cache_read_tokens: int | None = None
     cache_creation_tokens: int | None = None
+    reasoning_tokens: int | None = None
     api_call_count: int | None = None
 
 
@@ -419,6 +422,7 @@ def create_version(
     output_tokens: int | None = None,
     cache_read_tokens: int | None = None,
     cache_creation_tokens: int | None = None,
+    reasoning_tokens: int | None = None,
     api_call_count: int | None = None,
 ) -> Version:
     if type not in VERSION_TYPES:
@@ -451,6 +455,7 @@ def create_version(
             output_tokens=output_tokens,
             cache_read_tokens=cache_read_tokens,
             cache_creation_tokens=cache_creation_tokens,
+            reasoning_tokens=reasoning_tokens,
             api_call_count=api_call_count,
         )
         conn.commit()
@@ -550,6 +555,7 @@ def _insert_version(
     output_tokens: int | None = None,
     cache_read_tokens: int | None = None,
     cache_creation_tokens: int | None = None,
+    reasoning_tokens: int | None = None,
     api_call_count: int | None = None,
 ) -> Version:
     version = Version(
@@ -578,6 +584,7 @@ def _insert_version(
         output_tokens=output_tokens,
         cache_read_tokens=cache_read_tokens,
         cache_creation_tokens=cache_creation_tokens,
+        reasoning_tokens=reasoning_tokens,
         api_call_count=api_call_count,
     )
     conn.execute(
@@ -588,8 +595,8 @@ def _insert_version(
             confidence, generation_id, conversation_id, thinking_ref,
             thinking_source, confidence_reason, completed_at, completion_source,
             input_tokens, output_tokens, cache_read_tokens,
-            cache_creation_tokens, api_call_count
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            cache_creation_tokens, reasoning_tokens, api_call_count
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """,
         (
             version.id,
@@ -617,6 +624,7 @@ def _insert_version(
             version.output_tokens,
             version.cache_read_tokens,
             version.cache_creation_tokens,
+            version.reasoning_tokens,
             version.api_call_count,
         ),
     )
@@ -643,6 +651,20 @@ def find_prompt_by_turn(
         "AND conversation_id = ? AND generation_id = ? "
         "ORDER BY timestamp LIMIT 1",
         (conversation_id, generation_id),
+    ).fetchone()
+    return _row_to_version(row) if row else None
+
+
+def latest_prompt_for_conversation(
+    conn: sqlite3.Connection, conversation_id: str | None
+) -> Version | None:
+    """Return the most recently opened prompt for one adapter session."""
+    if not conversation_id:
+        return None
+    row = conn.execute(
+        "SELECT * FROM versions WHERE type = 'prompt' AND conversation_id = ? "
+        "ORDER BY timestamp DESC, rowid DESC LIMIT 1",
+        (conversation_id,),
     ).fetchone()
     return _row_to_version(row) if row else None
 
@@ -1000,6 +1022,9 @@ def _row_to_version(row: sqlite3.Row) -> Version:
             row["cache_creation_tokens"]
             if "cache_creation_tokens" in row.keys()
             else None
+        ),
+        reasoning_tokens=(
+            row["reasoning_tokens"] if "reasoning_tokens" in row.keys() else None
         ),
         api_call_count=(
             row["api_call_count"] if "api_call_count" in row.keys() else None

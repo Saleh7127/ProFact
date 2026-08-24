@@ -6,7 +6,8 @@ from pathlib import Path
 
 from typer.testing import CliRunner
 
-from profact import git_ops, session, store
+from profact import git_ops, store
+from profact.adapters import claude_sessions
 from profact.cli import app
 
 runner = CliRunner()
@@ -46,19 +47,25 @@ def test_start_claude_errors_without_claude_binary(git_repo: Path, monkeypatch) 
     assert "claude" in (result.output + str(result.exception)).lower()
 
 
-def test_start_claude_runs_proxy_then_claude(git_repo: Path, monkeypatch) -> None:
-    """run_claude wires proxy+watcher around the claude subprocess and tears down."""
+def test_start_claude_runs_session_monitor_then_claude(
+    git_repo: Path, monkeypatch
+) -> None:
     monkeypatch.setattr("shutil.which", lambda _name: "/usr/bin/claude")
+    sessions = git_repo.parent / "claude-projects"
+    sessions.mkdir()
 
     captured: dict = {}
+    real_run = subprocess.run
 
-    def fake_run(cmd, env=None, cwd=None):
+    def fake_run(cmd, cwd=None, **kwargs):
+        if cmd and cmd[0] == "git":
+            return real_run(cmd, cwd=cwd, **kwargs)
         captured["cmd"] = cmd
-        captured["base_url"] = env.get("ANTHROPIC_BASE_URL")
+        captured["cwd"] = cwd
         return subprocess.CompletedProcess(cmd, 0)
 
     monkeypatch.setattr("subprocess.run", fake_run)
-    code = session.run_claude(git_repo, port=7999)
+    code = claude_sessions.run_claude(git_repo, sessions=sessions)
     assert code == 0
     assert captured["cmd"] == ["/usr/bin/claude"]
-    assert captured["base_url"] == "http://127.0.0.1:7999"
+    assert captured["cwd"] == git_repo
