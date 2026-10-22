@@ -9,3 +9,4 @@ __pycache__/
 .profact/
 .pytest_cache/
 tmp/
+.env
