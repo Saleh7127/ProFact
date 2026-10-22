@@ -246,17 +246,6 @@ git tag -a eval-freeze-v1 -m "Frozen revision for thesis evaluation"
 git push origin eval-freeze-v1
 ```
 
-Before pushing, confirm that `origin` is the intended public ProFact repository.
-
-If the implementation changes after data collection starts, create a new tag
-such as `eval-freeze-v2`, record the reason, and rerun every affected experiment.
-Do not silently combine results produced by different revisions.
-
-See [TESTING.md](TESTING.md) for the full manual and adapter test guide,
-[profact_spec.md](profact_spec.md) for the design,
-[profact_tui_spec.md](profact_tui_spec.md) for the terminal UI contract, and
-[profact_roadmap.md](profact_roadmap.md) for planned work.
-
 ## License
 
 See [LICENSE](LICENSE).
